@@ -36,11 +36,15 @@ into one unified index. When two sources price the same SKU, the **newest source
 wins** — the email addendum's $3.60 overrides the GPO's $4.20. Provenance is kept
 on every price, because a recovery claim has to point at the document it came from.
 
-**2. Retrieve first, then let the model judge.**
-The agent retrieves a few candidate contract lines before any LLM call. This
-grounds the model (it can only choose among real contracted prices — it can't
-invent one), cuts cost (no stuffing the whole corpus into a prompt), and cuts
-latency. The retrieval score is *not* the final answer; it just narrows the field.
+**2. Retrieve to narrow, then let the LLM adjudicate — never trust one alone.**
+Retrieval (semantic embeddings via `all-MiniLM-L6-v2`) produces a shortlist of
+candidate contract lines; an LLM then picks the true match from that shortlist or
+declares it ambiguous. Each tool does what it's good at: retrieval is a *recall*
+tool (cast a wide net cheaply), the LLM is a *precision* tool (fine distinctions
+between near-duplicates). This division is load-bearing, not decorative — see the
+"Why retrieve-then-judge" note below for the concrete failure that motivated it.
+The LLM only ever chooses among real candidates by SKU, so it cannot invent a
+price, and it never sees a dollar figure at all.
 
 **3. The deterministic money math never touches the LLM.**
 Recovery dollars are `(list − contract) × quantity`, computed in plain code. The
@@ -56,15 +60,39 @@ sample data: two different glove contracts ($9.10 Medline, $8.40 Acme) both matc
 "exam gloves nitrile lg" equally well. The agent must send that to a human, not
 silently pick one.
 
-**5. A human gate guards every recovery claim.**
-Uncertain matches pause for human confirmation before any claim is recorded,
-because the cost of a wrong claim is asymmetric. In production this becomes a
-review queue; here it's a CLI confirmation.
+**5. The human gate disambiguates — it doesn't just rubber-stamp.**
+When the agent is merely unsure, the gate is a yes/no confirm. But when it
+*abstains* on genuine ambiguity (two equally-good contracts), a yes/no is
+meaningless — so the gate presents the candidate contracts with their prices and
+makes the human *choose which one*. Only then are prices filled and the recovery
+recorded. The audit trail keeps both the human's choice and the source document.
 
 **6. Recovery claims are idempotent and audited.**
 Claims are keyed on order ID — re-running the scan never double-counts. Every
 claim records the matched SKU, the source document, both prices, the confidence,
 and whether a human confirmed it.
+
+
+## Why retrieve-then-judge (a concrete failure)
+
+The two glove contracts are near-duplicates at different prices: Medline GLV-N100
+"Nitrile Exam Gloves, **Powder-Free**, Large, box/100" at $9.10, and Acme ACM-GLV-L
+"Nitrile exam gloves, large, box of 100" at $8.40.
+
+- **Keyword retrieval** scored both gloves *identically* for order PO-5001
+  ("nitrile gloves large pf box 100") — a dead tie, no way to choose.
+- **Semantic retrieval** broke the tie, but ranked them by general language
+  similarity and put the *wrong* glove on top (Acme, 0.798 vs Medline 0.742) — a
+  razor-thin 0.056 margin. It under-weighted "pf", which is domain shorthand for
+  powder-free that the embedding model was never trained on.
+- **The LLM adjudicator** — given the shortlist plus the hint that "pf" means
+  powder-free — correctly picked Medline, the powder-free contract.
+
+The lesson: retrieval alone cannot be trusted for a money decision on
+near-duplicates, and a hand-tuned similarity threshold is fragile (0.056 barely
+clearing a 0.05 cutoff is luck, not safety). The robustness comes from *composing*
+the tools — retrieval narrows, the LLM judges with domain context, and genuine
+ambiguity escalates to a human with an auditable reason.
 
 ## Two modes, one engine
 
@@ -76,14 +104,17 @@ and whether a human confirmed it.
 
 ## The sample data (designed to exercise judgment)
 
-| Order | Challenge | Intended outcome |
+| Order | Challenge | Outcome |
 |---|---|---|
-| PO-5001 | synonym-y glove description | match Medline GLV-N100 |
+| PO-5001 | "pf" shorthand; retrieval ranks the wrong glove | match Medline GLV-N100 — LLM uses domain hint |
 | PO-5002 | abbreviated, partial SKU hint | match Cardinal SYR-L10 |
-| PO-5003 | price lives only in an email addendum | match at the *new* $3.60 |
-| PO-5004 | two valid glove contracts, different prices | **uncertain → escalate** |
-| PO-5005 | nothing in any contract | no match, stays manual |
+| PO-5003 | price lives only in an email addendum | match at the *new* $3.60, not the old $4.20 |
+| PO-5004 | two glove contracts, no distinguishing detail | uncertain → human picks the contract |
+| PO-5005 | nothing in any contract | confident no-match, never escalated |
 | PO-5006 | price only in the prose local agreement | match Acme DRP-LG-2 |
+
+A clean run recovers **$4,450** across the matched orders ($1,320 + $320 + $360 +
+$1,000 auto-matched, plus $1,450 from the human-resolved PO-5004).
 
 ## Running it
 
