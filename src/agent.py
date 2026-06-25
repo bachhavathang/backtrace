@@ -219,19 +219,51 @@ def node_reverse_map(state: State) -> State:
 
 
 def node_human_gate(state: State) -> State:
-    """Pause for human confirmation on UNCERTAIN matches. Built for you.
+    """Pause for human confirmation on UNCERTAIN matches.
 
-    Interview point: the gate sits before a recovery CLAIM. A human confirms the
-    match before any money is clawed back, because the cost of a wrong claim is
-    asymmetric. In production this is a review queue + LangGraph interrupt.
+    Two cases:
+      - The agent picked a candidate but wasn't confident enough -> y/n confirm.
+      - The agent abstained (ambiguous, no pick) -> human must CHOOSE which
+        candidate, because a yes/no can't resolve "which of these two?".
+    On a confirmed/chosen match we fill prices so the recovery actually records.
     """
     r = state["result"]
-    print(f"\n=== CONFIRM MATCH: order {r.order_id} ===")
-    print(f"  proposed SKU {r.matched_sku} from {r.matched_source} "
-          f"(confidence {r.confidence:.2f})")
+    candidates = state.get("candidates", [])
+
+    print(f"\n=== REVIEW NEEDED: order {r.order_id} ===")
     print(f"  {r.rationale}")
-    ans = input("Confirm this is the same item? [y/N]: ").strip().lower()
-    r.human_confirmed = ans == "y"
+
+    chosen_contract = None
+
+    if r.matched_sku is not None:
+        # Agent had a pick; human just confirms it.
+        print(f"  proposed: {r.matched_sku} from {r.matched_source} "
+              f"(confidence {r.confidence:.2f})")
+        ans = input("Confirm this match? [y/N]: ").strip().lower()
+        if ans == "y":
+            chosen_contract = next(
+                (c.contract for c in candidates
+                 if c.contract.sku == r.matched_sku), None)
+    else:
+        # Agent abstained — human picks which candidate (or none).
+        print("  Agent could not choose. Candidates:")
+        for i, c in enumerate(candidates, start=1):
+            print(f"    [{i}] {c.contract.sku}  ${c.contract.contracted_unit_price}"
+                  f"  {c.contract.description}")
+        ans = input(f"Pick 1-{len(candidates)}, or N for none: ").strip().lower()
+        if ans.isdigit() and 1 <= int(ans) <= len(candidates):
+            chosen_contract = candidates[int(ans) - 1].contract
+
+    if chosen_contract is not None:
+        r.human_confirmed = True
+        r.matched_sku = chosen_contract.sku
+        r.matched_source = chosen_contract.source
+        r.list_unit_price = state["order"].list_unit_price
+        r.contracted_unit_price = chosen_contract.contracted_unit_price
+        r.quantity = state["order"].quantity
+    else:
+        r.human_confirmed = False
+
     return state
 
 
