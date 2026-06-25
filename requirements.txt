@@ -1,0 +1,6 @@
+pydantic>=2.0
+langgraph>=0.2
+anthropic>=0.40            # or openai>=1.0 — swap in agent/corpus
+sentence-transformers>=2.2 # for your semantic retrieval TODO (local, no API)
+pytest>=8.0
+streamlit>=1.30           # optional UI only

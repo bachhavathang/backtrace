@@ -1,0 +1,6 @@
+GPO NATIONAL OVERLAY PRICING — eff. 2025
+vendor|sku|description|price
+Medline|GLV-N100|Nitrile Exam Gloves, Powder-Free, Large, box/100|9.10
+Medline|GAU-4404|Gauze Sponge 4x4 12-ply sterile, pk/25|2.85
+Cardinal|SYR-L10|Luer-Lok Syringe 10 mL sterile|0.39
+Cardinal|CTH-F16|Foley Catheter 16Fr 2-way latex|4.20

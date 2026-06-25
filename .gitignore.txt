@@ -1,0 +1,5 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+data/mock_systems/recovery_ledger.json

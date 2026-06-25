@@ -1,0 +1,44 @@
+[
+  {
+    "order_id": "PO-5001",
+    "raw_description": "nitrile gloves large pf box 100",
+    "quantity": 300,
+    "list_unit_price": 13.5,
+    "sku_hint": null
+  },
+  {
+    "order_id": "PO-5002",
+    "raw_description": "10ml luer lock syringes sterile",
+    "quantity": 2000,
+    "list_unit_price": 0.55,
+    "sku_hint": "SYR"
+  },
+  {
+    "order_id": "PO-5003",
+    "raw_description": "foley cath 16fr two way",
+    "quantity": 150,
+    "list_unit_price": 6.0,
+    "sku_hint": null
+  },
+  {
+    "order_id": "PO-5004",
+    "raw_description": "exam gloves nitrile lg",
+    "quantity": 500,
+    "list_unit_price": 12.0,
+    "sku_hint": null
+  },
+  {
+    "order_id": "PO-5005",
+    "raw_description": "portable ultrasound gel warmer unit",
+    "quantity": 2,
+    "list_unit_price": 240.0,
+    "sku_hint": null
+  },
+  {
+    "order_id": "PO-5006",
+    "raw_description": "fenestrated surgical drape large sterile",
+    "quantity": 400,
+    "list_unit_price": 9.25,
+    "sku_hint": null
+  }
+]

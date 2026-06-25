@@ -1,0 +1,74 @@
+[
+  {
+    "order_id": "PO-5001",
+    "matched_sku": "GLV-N100",
+    "matched_source": "GPO overlay 2025",
+    "list_unit_price": null,
+    "contracted_unit_price": null,
+    "quantity": null,
+    "recoverable": 0.0,
+    "confidence": 0.5,
+    "human_confirmed": true,
+    "claimed_at": "2026-06-25T17:22:06.277841+00:00"
+  },
+  {
+    "order_id": "PO-5002",
+    "matched_sku": "SYR-L10",
+    "matched_source": "GPO overlay 2025",
+    "list_unit_price": null,
+    "contracted_unit_price": null,
+    "quantity": null,
+    "recoverable": 0.0,
+    "confidence": 0.5,
+    "human_confirmed": true,
+    "claimed_at": "2026-06-25T17:22:11.713307+00:00"
+  },
+  {
+    "order_id": "PO-5003",
+    "matched_sku": "CTH-F16",
+    "matched_source": "Email addendum 4/12",
+    "list_unit_price": null,
+    "contracted_unit_price": null,
+    "quantity": null,
+    "recoverable": 0.0,
+    "confidence": 0.5,
+    "human_confirmed": true,
+    "claimed_at": "2026-06-25T17:22:15.629208+00:00"
+  },
+  {
+    "order_id": "PO-5004",
+    "matched_sku": "GLV-N100",
+    "matched_source": "GPO overlay 2025",
+    "list_unit_price": null,
+    "contracted_unit_price": null,
+    "quantity": null,
+    "recoverable": 0.0,
+    "confidence": 0.5,
+    "human_confirmed": true,
+    "claimed_at": "2026-06-25T17:47:06.478147+00:00"
+  },
+  {
+    "order_id": "PO-5006",
+    "matched_sku": "DRP-LG-2",
+    "matched_source": "Local agreement - St. Mark's",
+    "list_unit_price": 9.25,
+    "contracted_unit_price": 6.75,
+    "quantity": 400.0,
+    "recoverable": 1000.0,
+    "confidence": 0.9,
+    "human_confirmed": null,
+    "claimed_at": "2026-06-25T17:47:06.508443+00:00"
+  },
+  {
+    "order_id": "PO-5005",
+    "matched_sku": null,
+    "matched_source": null,
+    "list_unit_price": null,
+    "contracted_unit_price": null,
+    "quantity": null,
+    "recoverable": 0.0,
+    "confidence": 0.0,
+    "human_confirmed": true,
+    "claimed_at": "2026-06-25T18:39:54.785466+00:00"
+  }
+]
