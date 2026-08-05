@@ -116,17 +116,7 @@ def retrieve_keyword(query: str, corpus: list[ContractPrice], k: int = 3
     return scored[:k]
 
 
-def retrieve_semantic(query: str, corpus: list[ContractPrice], k: int = 3
-                      ) -> list[CandidateMatch]:
-    """Embedding-based retrieval.
-
-    # TODO(you): implement. Embed each contract's (description + sku) once, embed
-    # the query, rank by cosine similarity. Use sentence-transformers locally or
-    # an embeddings API. Then compare results vs retrieve_keyword on PO-5003
-    # ("foley cath 16fr two way" vs "Foley Catheter 16Fr 2-way") — keyword will
-    # underrate it, embeddings won't. That delta is your talking point.
-    """
-   # Module-level cache so we load the model + embed the corpus only ONCE,
+# Module-level cache so we load the model + embed the corpus only ONCE,
 # not on every order. (Loading the model is slow; doing it per-call would crawl.)
 _model = None
 _corpus_cache = None

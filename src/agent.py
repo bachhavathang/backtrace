@@ -147,24 +147,14 @@ def _llm_confirm_match(order, contract) -> tuple[bool, float, str]:
 def node_reverse_map(state: State) -> State:
     """Adjudicate: does this order TRULY match a candidate, and how sure are we?
 
-    # TODO(you): THIS is your core deliverable. Given state["order"] and
-    # state["candidates"], produce a ReverseMapResult with a decision + confidence.
-    #
-    # A defensible approach (build, then refine):
-    #   1. If the top candidate's retrieval similarity is very low -> NO_MATCH.
-    #   2. If the top TWO candidates are both plausible but point to DIFFERENT
-    #      prices (the ambiguous-gloves case, PO-5004) -> UNCERTAIN (escalate).
-    #      Guessing here = risking a false recovery claim.
-    #   3. Otherwise call the LLM to confirm the order truly == the top candidate
-    #      (semantic equality, not just token overlap), and to return a calibrated
-    #      confidence + a rationale a human auditor could read.
-    #   4. confidence >= HIGH_BAR -> MATCH ; mid -> UNCERTAIN ; low -> NO_MATCH.
-    #
-    # Set state["result"] = ReverseMapResult(...). Fill list/contracted/quantity
-    # from the order + chosen candidate so recovery math works downstream.
-    #
-    # Defend: where's HIGH_BAR and why? Why escalate ambiguity instead of taking
-    # the cheaper/pricier match? How is the LLM constrained to not invent prices?
+    Stage A: if nothing clears the retrieval similarity floor (NO_MATCH_BAR),
+    short-circuit to NO_MATCH without an LLM call. Otherwise the LLM adjudicates
+    the shortlist (semantic equality, not token overlap) and returns a chosen
+    SKU, a calibrated confidence, and an auditor-readable rationale. Ambiguity
+    (plausible candidates at different prices) escalates to UNCERTAIN rather than
+    guessing, since a wrong match is a false recovery claim. confidence >=
+    HIGH_BAR -> MATCH, mid -> UNCERTAIN, < LOW_BAR -> NO_MATCH. Prices are copied
+    from the order + chosen candidate so the LLM never invents dollar figures.
     """
     order = state["order"]
     candidates = state["candidates"]
@@ -177,7 +167,7 @@ def node_reverse_map(state: State) -> State:
             order_id=order.order_id,
             decision=MatchDecision.NO_MATCH,
             confidence=0.0,
-            rationale="No contract candidate cleared the minimum cimilarity bar. ",
+            rationale="No contract candidate cleared the minimum similarity bar. ",
         )
         return state
 
@@ -278,8 +268,8 @@ def node_recover(state: State) -> State:
 def route_after_map(state: State) -> str:
     """Conditional edge after adjudication.
 
-    # TODO(you): return "recover", "human_gate", or "end" based on
-    # state["result"].decision (MATCH / UNCERTAIN / NO_MATCH).
+    Routes on state["result"].decision: MATCH -> recover, UNCERTAIN ->
+    human_gate, NO_MATCH -> end.
     """
     decision = state["result"].decision
     if decision == MatchDecision.MATCH:
@@ -298,42 +288,28 @@ def route_after_gate(state: State) -> str:
 # --- Graph ---------------------------------------------------------------
 
 def build_graph():
-    """Wire the StateGraph.
+    """Wire the StateGraph: retrieve -> reverse_map -> (recover | human_gate | end).
 
-    # TODO(you): assemble it. Sketch:
-    #   from langgraph.graph import StateGraph, END
-    #   g = StateGraph(State)
-    #   g.add_node("retrieve", node_retrieve)
-    #   g.add_node("reverse_map", node_reverse_map)
-    #   g.add_node("human_gate", node_human_gate)
-    #   g.add_node("recover", node_recover)
-    #   g.set_entry_point("retrieve")
-    #   g.add_edge("retrieve", "reverse_map")
-    #   g.add_conditional_edges("reverse_map", route_after_map,
-    #       {"recover": "recover", "human_gate": "human_gate", "end": END})
-    #   g.add_conditional_edges("human_gate", route_after_gate,
-    #       {"recover": "recover", "end": END})
-    #   g.add_edge("recover", END)
-    #   return g.compile()
+    The human_gate re-joins recover on confirm, or ends on decline.
     """
     from langgraph.graph import StateGraph, END
 
     g = StateGraph(State)
 
-    #2 add the nodes, name on the left, function on the right
+    # Add the nodes, name on the left, function on the right.
     g.add_node("retrieve", node_retrieve)
     g.add_node("reverse_map", node_reverse_map)
     g.add_node("human_gate", node_human_gate)
     g.add_node("recover", node_recover)
 
-    #3a. where does it start 
+    # Entry point.
     g.set_entry_point("retrieve")
 
-    #3b. staright arrows
+    # Straight edge.
     g.add_edge("retrieve", "reverse_map")
 
-    #3c. conditional edges, the fork
-    g.add_conditional_edges("reverse_map", route_after_map, { 
+    # Conditional edges (the fork).
+    g.add_conditional_edges("reverse_map", route_after_map, {
         "recover": "recover", 
         "human_gate": "human_gate", 
         "end": END
