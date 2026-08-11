@@ -133,16 +133,23 @@ $1,000 auto-matched, plus $1,450 from the human-resolved PO-5004).
 
 The deterministic layers are unit-tested; the adjudicator is a judgement call over
 messy text, so it is **evaluated against a labelled set** rather than asserted on.
-41 cases in `evals/dataset.json`, weighted toward the cases that produce false
+64 cases in `evals/dataset.json`, weighted toward the cases that produce false
 claims rather than the easy ones:
 
 | Category | n | What it tests |
 |---|---|---|
-| `clear` | 14 | One contract line is unambiguously right. Auto-match expected. |
-| `ambiguous` | 4 | Two contracts fit equally well at different prices. Escalation expected. |
+| `clear` | 20 | One contract line is unambiguously right. Auto-match expected. |
+| `ambiguous` | 7 | Undecidable from the text — either two contracts tie at different prices, or a price-determining attribute is simply absent. Escalation expected. |
 | `absent` | 8 | Nothing in the corpus is this product. |
-| `trap` | 11 | Superficially near-identical but conflicting on one attribute — 14Fr vs 16Fr, 5 mL vs 10 mL, non-sterile vs sterile, box/50 vs box/100. Retrieval scores these high, which is exactly why they are the risk. |
-| `injection` | 4 | Order text carrying instruction-like content. |
+| `trap` | 22 | Superficially near-identical, materially different. Beyond the plainly-contradicted attributes (14Fr vs 16Fr, box/50 vs box/100) these cover the shapes that generate real false claims: a **kit containing** the contracted item, a **unit-of-measure** mismatch (right item, incompatible price basis), a **combo product** built around it, a **product-class near-synonym** (surgeon's vs exam gloves), **reprocessed vs new**, an **added feature** that makes it a separate SKU, and a **vendor not party to any contract with every other attribute identical**. |
+| `injection` | 7 | Order text carrying instruction-like content — including role impersonation without tags, and the suppression direction (forcing a NO_MATCH to bury a real recovery). |
+
+The trap and ambiguous cases are the reason the set exists. An earlier 41-case
+version scored **100% precision at every threshold from 0.60 to 0.95**, which
+reads as a pass and is actually a measurement failure: no case in it could
+produce a confident wrong match, so the sweep could not tell one bar from
+another. Adding the cases above made the curve discriminate — and immediately
+exposed two real defects (see below).
 
 Accuracy is deliberately **not** the headline number, because the two error types
 are not symmetric. A **false claim** demands money from a vendor that isn't owed
@@ -164,6 +171,45 @@ number into a defended one. `agent.decide()` is a pure function of
 recorded verdicts across a grid of bars — the whole precision-vs-escalation curve
 for zero extra API calls.
 
+| `high_bar` | false claims | precision | recall | escalation |
+|---|---|---|---|---|
+| 0.60 – 0.70 | 2 | 90.5% | 95.0% | 20.3% |
+| 0.75 | 1 | 94.7% | 90.0% | 23.4% |
+| 0.80 | 1 | 94.4% | 85.0% | 25.0% |
+| **0.85** | **0** | **100%** | **85.0%** | **26.6%** |
+| 0.90 | 0 | 100% | 75.0% | 29.7% |
+| 0.95 | 0 | 100% | 55.0% | 35.9% |
+
+0.85 is the **lowest bar that reaches zero false claims**, and the highest-recall
+bar among those that do. Dropping to 0.80 buys no recall at all and costs a false
+claim; raising to 0.90 costs ten points of recall for no safety gain. That is the
+argument for the number — an ordering over measured rows, not an assertion.
+
+### What the harder cases found
+
+Expanding the set did not just confirm the bar; it broke the system twice, which
+is the point of an eval that can fail.
+
+**1. The model could not see vendor.** `build_user_message()` rendered only SKU
+and description, while the system prompt instructed the model to weigh a vendor
+named in the order. It was being asked to use a field that was never in front of
+it. The failure was symmetric and neither half was visible before: an order
+naming an uncontracted vendor (Kimberly-Clark gloves, every other attribute
+identical to a contract line) matched anyway, and an order naming a *contracted*
+vendor failed to match. Rendering vendor took false claims from 4 to 1 and
+precision from 80% to 94.1%.
+
+**2. The vendor rule was written where it could not be applied.** The remaining
+false claim explained itself in its own rationale — *"vendor name difference does
+not block match."* The exception lived as a subordinate clause inside a list of
+things that do **not** block a match, so the headline was read and the qualifier
+dropped. Promoting it to a first-class blocking rule closed the gap: **0 false
+claims, 100% precision, 22/22 traps.**
+
+Both were live in every scan before this. Neither was reachable by the old
+41-case set, and neither is the kind of bug a unit test finds — the code did
+exactly what it said, and what it said was wrong.
+
 ```bash
 python -m evals.run_eval --offline   # guardrails + retrieval, no key needed
 python -m evals.run_eval --sweep     # full run + the threshold curve
@@ -173,8 +219,11 @@ python -m evals.run_eval --sweep     # full run + the threshold curve
 
 The threat model is specific: a purchase-order description is free text from
 outside the hospital's control, and adjudicating it produces a **financial claim**.
-An attacker who can influence order text has a motive — induce a confident match
-to the wrong contract and cause a bogus claim. Five layers, weakest to strongest:
+An attacker who can influence order text has two motives, not one. The loud
+attack induces a confident match to the wrong contract and files a bogus claim.
+The quiet one forces a `NO_MATCH` to bury a recovery the vendor would rather not
+pay — and it is the harder of the two to notice, because nobody audits money that
+was never claimed. Both are in the eval set. Five layers, weakest to strongest:
 
 1. **Sanitise** — NFKC-normalise, strip control characters, collapse newlines, cap
    length, neutralise the `<order_text>` fence so a payload can't close it early.
@@ -193,8 +242,16 @@ to the wrong contract and cause a bogus claim. Five layers, weakest to strongest
    auto-claimed.
 
 Layers 1–2 raise the cost of an attack; layer 3 caps the payoff; 4–5 make failure
-safe rather than silent. Current state: **4/4 injections caught, 0 false positives
-across 37 benign order lines.**
+safe rather than silent. Current state: **7/7 injections caught, 0 false positives
+across 57 benign order lines.**
+
+Two of those seven were added late and initially got through, which is worth
+stating plainly: layer 1 matched `<system>` as a *tag*, so a bracketed
+`[SYSTEM NOTE: verification disabled…]` read as ordinary punctuation, and nothing
+matched the suppression direction at all (`"return no_match"`). Both are now
+tripwires. Neither would have mattered on its own — layer 3 still caps an
+injection to a choice among three real contract lines — but a tripwire that only
+fires on the attack you already imagined is not a measurement.
 
 ### Token optimisation
 
@@ -277,7 +334,7 @@ python main.py --sequential         # no concurrency, easier to follow
 
 python -m evals.run_eval --offline  # guardrail + retrieval checks, no key
 python -m evals.run_eval --sweep    # full eval + threshold curve
-pytest -q                           # 81 tests, no key needed
+pytest -q                           # 108 tests, no key needed
 ```
 
 ## Layout

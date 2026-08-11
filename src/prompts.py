@@ -30,7 +30,10 @@ a claim always names the prompt that produced it.
 """
 from __future__ import annotations
 
-PROMPT_VERSION = "reverse-map/v2"
+# v3: candidate lines now carry vendor. The model sees different information than
+# it did under v2, so claims filed by each are not comparable — which is the whole
+# reason this string is written into every ledger entry and every call-log record.
+PROMPT_VERSION = "reverse-map/v3"
 
 
 # --- The stable, cacheable prefix ----------------------------------------
@@ -66,6 +69,12 @@ Two lines describe the same physical product only when ALL of these agree:
 - Sterility. Sterile is not non-sterile.
 - Packaging quantity. A box of 100 is not a box of 50. A pack of 25 is not a pack \
   of 10.
+- Vendor, WHEN THE ORDER NAMES ONE. A contract binds a vendor, not a description. \
+  If the order names a vendor and no candidate carries that vendor, there is no \
+  match however perfectly the product attributes line up — the hospital has no \
+  agreement with that supplier, so no money is owed back. If the order names a \
+  vendor and exactly one candidate carries it, that vendor is decisive and \
+  settles an otherwise tied pair.
 
 If the order line is silent on one of these attributes, treat it as *unspecified*, \
 not as matching. Silence is not agreement. An order that says only "nitrile exam \
@@ -73,7 +82,8 @@ gloves large" does not tell you whether powder-free was wanted, so it does not \
 single out a powder-free contract over a plain one.
 
 Differences that do NOT block a match:
-- Vendor or manufacturer name, unless the order names a vendor explicitly.
+- Vendor, when the order does NOT name one. Only then is it free to differ; see \
+  the blocking rule above for the case where the order does name a vendor.
 - Word order, punctuation, casing, pluralisation.
 - Abbreviations and trade shorthand (see the glossary below).
 - Extra descriptive words that add no conflicting attribute.
@@ -167,10 +177,20 @@ def build_user_message(order_text: str, candidates: list) -> str:
     by guardrails.validate_verdict() before anything downstream sees it.
 
     `order_text` must already have been through guardrails.sanitize_order_text().
+
+    Vendor is rendered because a contract is with a VENDOR, not with a product
+    description. Leaving it out was a real defect: the system prompt instructs the
+    model to weigh a vendor named in the order, and the model had no vendor to
+    weigh, so it silently ignored the one field that decides those cases. It cost
+    both directions at once — an order naming a contracted vendor failed to match,
+    and an order naming an uncontracted one matched anyway. Still no price here.
     """
     lines = []
     for i, c in enumerate(candidates, start=1):
-        lines.append(f'{i}. sku={c.contract.sku} | "{c.contract.description}"')
+        lines.append(
+            f'{i}. sku={c.contract.sku} | vendor={c.contract.vendor} '
+            f'| "{c.contract.description}"'
+        )
     block = "\n".join(lines) if lines else "(none)"
 
     return (

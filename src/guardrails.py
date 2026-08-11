@@ -83,6 +83,20 @@ _INJECTION_PATTERNS = [
         r"\bsystem\s+prompt\b",
         r"\bas\s+an?\s+ai\b",
         r"\boverride\b.{0,20}\b(instruction|rule|policy|prompt)\b",
+        # A role header does not need angle brackets to impersonate one. Bracketed
+        # pseudo-directives read as privileged text to a model and as ordinary
+        # punctuation to a tag-matching regex.
+        r"\[\s*(system|admin|developer|assistant|operator|instruction)\b",
+        r"\bnote\s+to\s+(the\s+)?(reviewer|reader|agent|assistant|system|auditor|approver)\b",
+        # Imperatives naming this pipeline's own output vocabulary. A description of
+        # a physical good has no reason to instruct anyone to return a decision.
+        r"\b(return|output|respond\s+with|reply\s+with|answer|mark\s+(it\s+)?as)\s+"
+        r"(with\s+)?(no_match|match|uncertain|confidence|chosen_index|chosen_sku)\b",
+        r"\bconfidence\s+(of\s+|to\s+)?[01](\.\d+)?\b",
+        # Claims that a control is switched off. Nothing in a purchase order line
+        # is entitled to make an assertion about the state of our own guardrails.
+        r"\b(verification|validation|guardrail|review|approval|checking)\s+"
+        r"(is\s+|are\s+|has\s+been\s+)?(disabled|off|bypassed|skipped|waived|not\s+required)\b",
     )
 ]
 
