@@ -27,6 +27,60 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 LOGS = DATA / "logs"
 CALL_LOG = LOGS / "llm_calls.jsonl"
+ENV_FILE = ROOT / ".env"
+
+
+# --- Credentials ---------------------------------------------------------
+
+def load_dotenv(path: Path | str | None = None) -> int:
+    """Read KEY=value lines from a .env file into os.environ. Returns the count set.
+
+    Hand-rolled instead of taking a python-dotenv dependency: this file carries
+    one credential in a two-line format, and a new package would put a
+    `pip install` between a fresh clone and its first run.
+
+    A variable already present in the environment always wins. That precedence is
+    the point, not an accident — it lets CI, a shell export, or a throwaway
+    `$env:ANTHROPIC_API_KEY` override the file without anyone having to remember
+    to edit or delete it. The file is the fallback, never the authority.
+
+    Never raises. A missing or unreadable .env is the normal case (offline runs,
+    CI, the test suite), and failing to find one is not an error.
+    """
+    path = Path(path) if path is not None else ENV_FILE
+    try:
+        # utf-8-sig: Windows editors and PowerShell redirection both like to
+        # leave a BOM, which would otherwise ride along inside the first key name.
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return 0
+
+    loaded = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        # Empty value is treated as absent, so a placeholder `ANTHROPIC_API_KEY=`
+        # left unfilled produces the clean "no credential" message rather than a
+        # baffling 401 from the API.
+        if key and value and key not in os.environ:
+            os.environ[key] = value
+            loaded += 1
+    return loaded
+
+
+# Import-time so that every entry point (main, evals, tests) picks the file up
+# without having to remember to call it. config is imported before any code
+# reads a credential, which makes this the one place it can go.
+load_dotenv()
 
 
 # --- Model tiers ---------------------------------------------------------

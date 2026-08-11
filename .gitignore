@@ -1,4 +1,10 @@
+# Credentials. `.env.*` is deliberately broad — a bare `.env` pattern does NOT
+# match .env.local / .env.backup / .env.example, which is how a real key ends up
+# committed. The template is the one explicit exception.
 .env
+.env.*
+!.env.example
+
 __pycache__/
 *.pyc
 .venv/
