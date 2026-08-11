@@ -1,6 +1,7 @@
 pydantic>=2.0
 langgraph>=0.2
-anthropic>=0.40            # or openai>=1.0 — swap in agent/corpus
-sentence-transformers>=2.2 # for your semantic retrieval TODO (local, no API)
+anthropic>=0.112           # needs output_config (structured outputs) + count_tokens
+sentence-transformers>=2.2 # local semantic retrieval, no API call
+httpx>=0.27                # transitive via anthropic; used directly to fake transports in tests
 pytest>=8.0
-streamlit>=1.30           # optional UI only
+streamlit>=1.30            # optional UI only

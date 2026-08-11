@@ -1,282 +1,279 @@
 """Stage 2 — THE CORE. The reverse-map agent.
 
-This is the file that mirrors Resolvd's "procurement-price specialist agent" and
-the one that closes your gap. Everything else feeds it. Spend your best hours here.
-
 Flow (a LangGraph StateGraph):
 
     retrieve ──▶ REVERSE_MAP ──(confident)──▶ recover ──▶ END
                      │
                      ├──(uncertain)──▶ human_gate ──(confirm)──▶ recover ──▶ END
-                     │                            └──(deny)─────────────────▶ END
+                     │                            └──(deny/defer)───────────▶ END
                      └──(no_match)──────────────────────────────────────────▶ END
 
-What's built: retrieve + recover + human_gate nodes (they reuse the modules that
-already work). What's YOURS (# TODO): node_reverse_map (the adjudication +
-confidence policy), route_after_map (branching), build_graph (wiring). Write them
-yourself before asking the AI to critique — you must defend every edge live.
-
-THE central risk to reason about (say this in the interview):
+THE central risk this file is organised around:
   A FALSE POSITIVE is worse than a miss. If you wrongly map an order to a
   contract, you file a recovery claim against a vendor for money you aren't owed
-  — that's a credibility hit with the customer AND the vendor. So the confidence
-  bar for auto-claiming must be HIGH, and anything ambiguous (e.g. two glove
-  contracts at different prices) must escalate, never guess.
+  — a credibility hit with the customer AND the vendor. So the confidence bar for
+  auto-claiming is HIGH, anything ambiguous escalates rather than guessing, and
+  every failure path in this file abstains rather than assuming.
+
+Three things live here that are easy to miss:
+
+  Short-circuit  If nothing clears the retrieval floor, NO_MATCH is returned
+                 without an LLM call at all. On a real corpus most non-catalog
+                 lines genuinely aren't under contract, so this is the single
+                 largest cost saving in the pipeline — it is free to be sure
+                 about the obvious negatives.
+
+  Tiering        Adjudications are routed to the cheapest model that can safely
+                 make them (config.pick_tier). Close calls — the ones that
+                 produce false claims — buy the stronger model.
+
+  Deferred gate  In batch mode the human gate does not block. A scan of ten
+                 thousand orders cannot stop on order three waiting for someone
+                 to type 'y'. Uncertain lines are queued and reviewed after the
+                 scan completes; see main.py.
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from tkinter import END
+import threading
 from typing import TypedDict
-from unittest import result
 
+from .config import RETRIEVAL_K, THRESHOLDS, Thresholds, pick_tier
+from .corpus import build_corpus, corpus_version, retrieve_semantic
+from .llm import adjudicate
+from .recovery import record_recovery
 from .schema import (CandidateMatch, ContractPrice, MatchDecision,
                      OrderLine, ReverseMapResult)
-from .corpus import build_corpus, retrieve_keyword, retrieve_semantic
-from .recovery import record_recovery
-
-SYSTEMS = Path(__file__).resolve().parent.parent / "data" / "mock_systems"
 
 
 class State(TypedDict, total=False):
+    """Graph state.
+
+    order        the OrderLine under adjudication
+    candidates   the retrieved shortlist
+    result       the ReverseMapResult being built up
+    interactive  whether the human gate may block on stdin (False in batch mode)
+    """
     order: OrderLine
     candidates: list[CandidateMatch]
     result: ReverseMapResult
+    interactive: bool
 
 
 # --- Nodes ---------------------------------------------------------------
 
 def node_retrieve(state: State) -> State:
-    """Pull candidate contract lines for this order. Built for you.
+    """Pull candidate contract lines for this order.
 
-    Uses keyword retrieval so it runs key-free. Swap to your retrieve_semantic
-    once you've built it (and talk about the difference).
+    Retrieval is the *recall* half of retrieve-then-judge: cast a wide net
+    cheaply. It is also what keeps the prompt small — the corpus could hold ten
+    thousand contract lines and the adjudicator still only ever sees three.
     """
     corpus = build_corpus()
     order = state["order"]
     query = order.raw_description + (f" {order.sku_hint}" if order.sku_hint else "")
-    state["candidates"] = retrieve_semantic(query, corpus, k=3)
+    state["candidates"] = retrieve_semantic(query, corpus, k=RETRIEVAL_K)
     return state
-
-def _llm_adjudicate(order, candidates) -> dict:
-    """Show the LLM the shortlist; let it choose the best match OR flag ambiguity.
-
-    Retrieval narrows (recall); the LLM adjudicates the shortlist (precision).
-    The LLM picks among REAL candidates by SKU — it can't invent one, and it
-    never sees or sets a price.
-
-    Returns: {"chosen_sku": str|None, "confidence": float, "is_ambiguous": bool,
-              "reason": str}
-    """
-    import json
-    from anthropic import Anthropic
-
-    # Build a numbered list of the candidates for the prompt.
-    lines = []
-    for c in candidates:
-        lines.append(f'- sku "{c.contract.sku}": "{c.contract.description}"')
-    candidate_block = "\n".join(lines)
-
-    prompt = f"""You match a hospital purchase order line to the correct contract item.
-Choose the ONE contract item that is the same physical product (type, size, form,
-packaging). Note domain shorthand: "pf" means powder-free, "lg" means large.
-
-If two or more candidates fit equally well and you cannot distinguish them from the
-order text, set is_ambiguous to true and chosen_sku to null — do NOT guess.
-
-ORDER: "{order.raw_description}"
-
-CANDIDATES:
-{candidate_block}
-
-Return ONLY valid JSON, no markdown:
-{{"chosen_sku": "<sku or null>", "confidence": 0.0-1.0, "is_ambiguous": true/false, "reason": "<one short sentence>"}}"""
-
-    client = Anthropic()
-    msg = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=250,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = msg.content[0].text.strip()
-    text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    data = json.loads(text)
-
-    sku = data.get("chosen_sku")
-    if sku in (None, "null", ""):
-        sku = None
-    return {
-        "chosen_sku": sku,
-        "confidence": float(data.get("confidence", 0.0)),
-        "is_ambiguous": bool(data.get("is_ambiguous", False)),
-        "reason": str(data.get("reason", "")),
-    }
-
-def _llm_confirm_match(order, contract) -> tuple[bool, float, str]:
-    """ Ask the LLM: is this orfder the SAME physical item as this contract line?
-
-    Returns: (is_match, confidence 0..1, one line reason). The LLM judges sameness only - it never sees or sets a price.
-    """
-    import json
-    from anthropic import Anthropic
-    
-    prompt = f""" You compare hospital purchase order line to a contract line and decide if they are 
-    the SAME physical product. Consider product type, size, form, and packaging. ignore vendor name differences.
-
-    ORDER: "{order.raw_description}"
-    CONTRACT: "{contract.description}" (sku {contract.sku})
-
-    Return ONLY valid Json, no markdown:
-    {{"is_match": boolean, "confidence": 0.0-1.0, "reason": "<one short sentence>"}}"""
-
-    client = Anthropic()
-    msg = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens = 200,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    text = msg.content[0].text.strip()
-    text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    data = json.loads(text)
-    return bool(data["is_match"]), float(data["confidence"]), str(data["reason"])
-
 
 
 def node_reverse_map(state: State) -> State:
     """Adjudicate: does this order TRULY match a candidate, and how sure are we?
 
-    Stage A: if nothing clears the retrieval similarity floor (NO_MATCH_BAR),
-    short-circuit to NO_MATCH without an LLM call. Otherwise the LLM adjudicates
-    the shortlist (semantic equality, not token overlap) and returns a chosen
-    SKU, a calibrated confidence, and an auditor-readable rationale. Ambiguity
-    (plausible candidates at different prices) escalates to UNCERTAIN rather than
-    guessing, since a wrong match is a false recovery claim. confidence >=
-    HIGH_BAR -> MATCH, mid -> UNCERTAIN, < LOW_BAR -> NO_MATCH. Prices are copied
-    from the order + chosen candidate so the LLM never invents dollar figures.
+    Stage A: if nothing clears NO_MATCH_BAR, short-circuit without an LLM call.
+    Stage B: route to a model tier based on how close the top two candidates are.
+    Stage C: the model picks from the shortlist by index; guardrails re-validate.
+    Stage D: map a validated verdict onto the confidence bands.
+
+    Prices are copied from the order and the chosen contract record — the model
+    never sees a dollar figure, so it cannot invent one.
     """
     order = state["order"]
-    candidates = state["candidates"]
-    
-    #Stage A nothing fits well enough, NO MATCH
-    NO_MATCH_BAR = 0.15
+    candidates: list[CandidateMatch] = state["candidates"]
+
+    # --- Stage A: nothing plausible, and we can know that for free ---
     top = candidates[0] if candidates else None
-    if top is None or top.similarity < NO_MATCH_BAR:
+    if top is None or top.similarity < THRESHOLDS.no_match_bar:
         state["result"] = ReverseMapResult(
             order_id=order.order_id,
             decision=MatchDecision.NO_MATCH,
             confidence=0.0,
-            rationale="No contract candidate cleared the minimum similarity bar. ",
+            rationale=(
+                "No contract candidate cleared the minimum retrieval similarity "
+                f"({THRESHOLDS.no_match_bar}); not sent for adjudication."
+            ),
+            corpus_version=corpus_version(),
+            candidates_considered=[c.contract.sku for c in candidates],
         )
         return state
 
-    # Stages B+C collapsed: let the LLM adjudicate the shortlist.
-    HIGH_BAR = 0.85
-    LOW_BAR = 0.50
-    verdict = _llm_adjudicate(order, candidates)
+    # --- Stage B: pick the cheapest model that can safely make this call ---
+    runner_up = candidates[1].similarity if len(candidates) > 1 else 0.0
+    tier = pick_tier(top.similarity, runner_up)
 
-    # Find the chosen candidate by SKU (None if the LLM abstained).
-    chosen = next((c for c in candidates
-                   if c.contract.sku == verdict["chosen_sku"]), None)
+    # --- Stage C: adjudicate. Never raises; failures come back as abstentions. ---
+    verdict, call = adjudicate(
+        order_id=order.order_id,
+        order_text=order.raw_description,
+        candidates=candidates,
+        tier=tier,
+    )
 
-    if verdict["is_ambiguous"]:
-        decision = MatchDecision.UNCERTAIN
-    elif chosen is None or verdict["confidence"] < LOW_BAR:
-        decision = MatchDecision.NO_MATCH
-    elif verdict["confidence"] >= HIGH_BAR:
-        decision = MatchDecision.MATCH
-    else:
-        decision = MatchDecision.UNCERTAIN
+    chosen = candidates[verdict.chosen_index - 1] if verdict.chosen_index else None
+
+    # --- Stage D: confidence bands ---
+    decision = decide(verdict, chosen is not None)
 
     result = ReverseMapResult(
         order_id=order.order_id,
         decision=decision,
-        confidence=verdict["confidence"],
+        confidence=verdict.confidence,
         matched_sku=(chosen.contract.sku if chosen else None),
         matched_source=(chosen.contract.source if chosen else None),
-        rationale=verdict["reason"],
+        rationale=verdict.reason,
+        # Provenance: what decided this, and what it was looking at.
+        model=call.model,
+        tier=call.tier,
+        prompt_version=call.prompt_version,
+        corpus_version=corpus_version(),
+        candidates_considered=[c.contract.sku for c in candidates],
+        guardrail_flags=verdict.flags,
+        latency_ms=round(call.latency_ms, 1),
+        cost_usd=round(call.cost_usd, 6),
     )
+
     if decision == MatchDecision.MATCH and chosen is not None:
-        result.list_unit_price = order.list_unit_price
-        result.contracted_unit_price = chosen.contract.contracted_unit_price
-        result.quantity = order.quantity
+        _fill_prices(result, order, chosen.contract)
 
     state["result"] = result
     return state
-    
-    
+
+
+def decide(verdict, has_match: bool, thresholds: Thresholds | None = None
+           ) -> MatchDecision:
+    """Map a validated verdict onto MATCH / UNCERTAIN / NO_MATCH. Pure function.
+
+    Pure and threshold-parameterised on purpose: evals/run_eval.py adjudicates
+    the whole eval set once, then replays this function across a grid of
+    thresholds to plot the precision-versus-escalation curve. The bars stay a
+    measured choice rather than two literals nobody can defend, and sweeping
+    them costs nothing because it re-decides recorded verdicts instead of
+    re-calling the model.
+
+    Order of checks matters. A guardrail violation outranks the model's own
+    confidence: a suspected injection or a malformed verdict escalates no matter
+    how certain the model claimed to be.
+    """
+    t = thresholds or THRESHOLDS
+    if verdict.must_escalate:
+        return MatchDecision.UNCERTAIN
+    if verdict.is_ambiguous:
+        return MatchDecision.UNCERTAIN
+    if not has_match:
+        return MatchDecision.NO_MATCH
+    if verdict.confidence < t.low_bar:
+        return MatchDecision.NO_MATCH
+    if verdict.confidence >= t.high_bar:
+        return MatchDecision.MATCH
+    return MatchDecision.UNCERTAIN
 
 
 def node_human_gate(state: State) -> State:
-    """Pause for human confirmation on UNCERTAIN matches.
+    """Escalate an UNCERTAIN match to a person.
 
-    Two cases:
-      - The agent picked a candidate but wasn't confident enough -> y/n confirm.
-      - The agent abstained (ambiguous, no pick) -> human must CHOOSE which
-        candidate, because a yes/no can't resolve "which of these two?".
-    On a confirmed/chosen match we fill prices so the recovery actually records.
+    In interactive mode this prompts on stdin. In batch mode it does nothing and
+    leaves human_confirmed as None, which routes to END and leaves the line in
+    the review queue — a scan must not block on a human, and a human should not
+    be asked to adjudicate one line at a time while a scan holds a connection
+    pool open.
     """
-    r = state["result"]
-    candidates = state.get("candidates", [])
-
-    print(f"\n=== REVIEW NEEDED: order {r.order_id} ===")
-    print(f"  {r.rationale}")
-
-    chosen_contract = None
-
-    if r.matched_sku is not None:
-        # Agent had a pick; human just confirms it.
-        print(f"  proposed: {r.matched_sku} from {r.matched_source} "
-              f"(confidence {r.confidence:.2f})")
-        ans = input("Confirm this match? [y/N]: ").strip().lower()
-        if ans == "y":
-            chosen_contract = next(
-                (c.contract for c in candidates
-                 if c.contract.sku == r.matched_sku), None)
-    else:
-        # Agent abstained — human picks which candidate (or none).
-        print("  Agent could not choose. Candidates:")
-        for i, c in enumerate(candidates, start=1):
-            print(f"    [{i}] {c.contract.sku}  ${c.contract.contracted_unit_price}"
-                  f"  {c.contract.description}")
-        ans = input(f"Pick 1-{len(candidates)}, or N for none: ").strip().lower()
-        if ans.isdigit() and 1 <= int(ans) <= len(candidates):
-            chosen_contract = candidates[int(ans) - 1].contract
-
-    if chosen_contract is not None:
-        r.human_confirmed = True
-        r.matched_sku = chosen_contract.sku
-        r.matched_source = chosen_contract.source
-        r.list_unit_price = state["order"].list_unit_price
-        r.contracted_unit_price = chosen_contract.contracted_unit_price
-        r.quantity = state["order"].quantity
-    else:
-        r.human_confirmed = False
-
+    if not state.get("interactive", True):
+        return state
+    review_interactively(state["result"], state["candidates"], state["order"])
     return state
 
 
 def node_recover(state: State) -> State:
-    """Record the recovery (idempotent + audited). Built for you."""
+    """Record the recovery (idempotent + audited)."""
     record_recovery(state["result"])
     return state
+
+
+# --- Human review --------------------------------------------------------
+
+def review_interactively(result: ReverseMapResult, candidates: list[CandidateMatch],
+                         order: OrderLine) -> ReverseMapResult:
+    """Ask a person to resolve one UNCERTAIN line. Mutates and returns the result.
+
+    Two distinct cases, and conflating them is a real usability bug:
+      - The agent picked a candidate but wasn't confident enough -> y/n confirm.
+      - The agent abstained on genuine ambiguity -> a yes/no is meaningless, so
+        the human must CHOOSE which contract line applies.
+    """
+    print(f"\n=== REVIEW NEEDED: order {result.order_id} ===")
+    print(f"  ordered: {order.raw_description!r}  "
+          f"qty {order.quantity:g} @ ${order.list_unit_price:.2f} list")
+    print(f"  agent:   {result.rationale}")
+    if result.blocked_by_guardrail:
+        print(f"  ! guardrail: {', '.join(result.guardrail_flags)}")
+
+    chosen_contract: ContractPrice | None = None
+
+    if result.matched_sku is not None:
+        print(f"  proposed: {result.matched_sku} from {result.matched_source} "
+              f"(confidence {result.confidence:.2f})")
+        if input("Confirm this match? [y/N]: ").strip().lower() == "y":
+            chosen_contract = next(
+                (c.contract for c in candidates
+                 if c.contract.sku == result.matched_sku), None)
+    else:
+        print("  Agent could not choose. Candidates:")
+        for i, c in enumerate(candidates, start=1):
+            print(f"    [{i}] {c.contract.sku}  ${c.contract.contracted_unit_price:.2f}"
+                  f"  {c.contract.description}")
+        answer = input(f"Pick 1-{len(candidates)}, or N for none: ").strip().lower()
+        if answer.isdigit() and 1 <= int(answer) <= len(candidates):
+            chosen_contract = candidates[int(answer) - 1].contract
+
+    if chosen_contract is not None:
+        result.human_confirmed = True
+        result.matched_sku = chosen_contract.sku
+        result.matched_source = chosen_contract.source
+        _fill_prices(result, order, chosen_contract)
+    else:
+        result.human_confirmed = False
+
+    return result
+
+
+def candidates_for(result: ReverseMapResult) -> list[CandidateMatch]:
+    """Rebuild the shortlist a result was decided against, from its provenance.
+
+    Lets the deferred review phase in main.py show the same candidates the agent
+    saw, without carrying graph state around between the scan and the review.
+    """
+    by_sku = {c.sku: c for c in build_corpus()}
+    return [
+        CandidateMatch(contract=by_sku[sku], similarity=0.0)
+        for sku in result.candidates_considered if sku in by_sku
+    ]
+
+
+def _fill_prices(result: ReverseMapResult, order: OrderLine,
+                 contract: ContractPrice) -> None:
+    """Copy prices from the order and the contract record. Never from the model."""
+    result.list_unit_price = order.list_unit_price
+    result.contracted_unit_price = contract.contracted_unit_price
+    result.quantity = order.quantity
 
 
 # --- Routing -------------------------------------------------------------
 
 def route_after_map(state: State) -> str:
-    """Conditional edge after adjudication.
-
-    Routes on state["result"].decision: MATCH -> recover, UNCERTAIN ->
-    human_gate, NO_MATCH -> end.
-    """
     decision = state["result"].decision
     if decision == MatchDecision.MATCH:
         return "recover"
-    elif decision == MatchDecision.UNCERTAIN:
+    if decision == MatchDecision.UNCERTAIN:
         return "human_gate"
-    elif decision == MatchDecision.NO_MATCH:
+    if decision == MatchDecision.NO_MATCH:
         return "end"
     raise ValueError(f"Invalid decision: {decision}")
 
@@ -287,42 +284,54 @@ def route_after_gate(state: State) -> str:
 
 # --- Graph ---------------------------------------------------------------
 
+_graph = None
+_graph_lock = threading.Lock()
+
+
 def build_graph():
-    """Wire the StateGraph: retrieve -> reverse_map -> (recover | human_gate | end).
+    """Compile the StateGraph once and reuse it.
 
-    The human_gate re-joins recover on confirm, or ends on decline.
+    This used to be rebuilt per order line: a scan of N orders compiled N
+    identical graphs before doing any work. The compiled graph is stateless
+    across invocations, so one instance serves the whole scan, including
+    concurrent invocations.
     """
-    from langgraph.graph import StateGraph, END
+    global _graph
+    if _graph is not None:
+        return _graph
 
-    g = StateGraph(State)
+    with _graph_lock:
+        if _graph is not None:
+            return _graph
+        from langgraph.graph import END, StateGraph
 
-    # Add the nodes, name on the left, function on the right.
-    g.add_node("retrieve", node_retrieve)
-    g.add_node("reverse_map", node_reverse_map)
-    g.add_node("human_gate", node_human_gate)
-    g.add_node("recover", node_recover)
+        g = StateGraph(State)
+        g.add_node("retrieve", node_retrieve)
+        g.add_node("reverse_map", node_reverse_map)
+        g.add_node("human_gate", node_human_gate)
+        g.add_node("recover", node_recover)
 
-    # Entry point.
-    g.set_entry_point("retrieve")
-
-    # Straight edge.
-    g.add_edge("retrieve", "reverse_map")
-
-    # Conditional edges (the fork).
-    g.add_conditional_edges("reverse_map", route_after_map, {
-        "recover": "recover", 
-        "human_gate": "human_gate", 
-        "end": END
+        g.set_entry_point("retrieve")
+        g.add_edge("retrieve", "reverse_map")
+        g.add_conditional_edges("reverse_map", route_after_map, {
+            "recover": "recover",
+            "human_gate": "human_gate",
+            "end": END,
         })
-    g.add_conditional_edges("human_gate", route_after_gate, {
-        "recover": "recover",
-        "end" : END,
-    })    
+        g.add_conditional_edges("human_gate", route_after_gate, {
+            "recover": "recover",
+            "end": END,
+        })
 
-    return g.compile()
+        _graph = g.compile()
+    return _graph
 
 
-def run_one(order: OrderLine) -> ReverseMapResult:
-    graph = build_graph()
-    final = graph.invoke({"order": order})
+def run_one(order: OrderLine, interactive: bool = True) -> ReverseMapResult:
+    """Reverse-map a single order line.
+
+    interactive=True  the human gate blocks on stdin (single-order / forward mode)
+    interactive=False uncertain lines are left for a later review pass (batch scan)
+    """
+    final = build_graph().invoke({"order": order, "interactive": interactive})
     return final["result"]

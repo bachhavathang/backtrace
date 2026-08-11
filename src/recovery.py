@@ -14,6 +14,7 @@ Two properties that separate this from a toy:
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,28 +29,47 @@ def _load() -> list[dict]:
     return json.loads(LEDGER.read_text())
 
 
-def record_recovery(result: ReverseMapResult) -> dict:
-    """Post a confirmed recovery to the ledger. Idempotent on order_id."""
-    ledger = _load()
-    for entry in ledger:
-        if entry["order_id"] == result.order_id:
-            return {"status": "noop_already_claimed", "order_id": result.order_id}
+_lock = threading.Lock()
 
-    entry = {
-        "order_id": result.order_id,
-        "matched_sku": result.matched_sku,
-        "matched_source": result.matched_source,
-        "list_unit_price": result.list_unit_price,
-        "contracted_unit_price": result.contracted_unit_price,
-        "quantity": result.quantity,
-        "recoverable": result.recoverable,
-        "confidence": result.confidence,
-        "human_confirmed": result.human_confirmed,
-        "claimed_at": datetime.now(timezone.utc).isoformat(),
-    }
-    ledger.append(entry)
-    LEDGER.write_text(json.dumps(ledger, indent=2))
-    return {"status": "claimed", **entry}
+
+def record_recovery(result: ReverseMapResult) -> dict:
+    """Post a confirmed recovery to the ledger. Idempotent on order_id.
+
+    The lock makes read-check-append atomic. Without it, a concurrent scan can
+    interleave two claims for the same order between the duplicate check and the
+    write, and idempotency-by-order_id silently stops holding — which is the one
+    property this module exists to guarantee.
+    """
+    with _lock:
+        ledger = _load()
+        for entry in ledger:
+            if entry["order_id"] == result.order_id:
+                return {"status": "noop_already_claimed", "order_id": result.order_id}
+
+        entry = {
+            "order_id": result.order_id,
+            "matched_sku": result.matched_sku,
+            "matched_source": result.matched_source,
+            "list_unit_price": result.list_unit_price,
+            "contracted_unit_price": result.contracted_unit_price,
+            "quantity": result.quantity,
+            "recoverable": result.recoverable,
+            "confidence": result.confidence,
+            "human_confirmed": result.human_confirmed,
+            "claimed_at": datetime.now(timezone.utc).isoformat(),
+            # --- Provenance: how to reconstruct this decision under dispute ---
+            "decided_by": "human" if result.human_confirmed else "agent",
+            "model": result.model,
+            "tier": result.tier,
+            "prompt_version": result.prompt_version,
+            "corpus_version": result.corpus_version,
+            "candidates_considered": result.candidates_considered,
+            "guardrail_flags": result.guardrail_flags,
+            "rationale": result.rationale,
+        }
+        ledger.append(entry)
+        LEDGER.write_text(json.dumps(ledger, indent=2))
+        return {"status": "claimed", **entry}
 
 
 def total_recovered() -> float:

@@ -33,27 +33,45 @@ order line (vague, no clean SKU)
       └──(no match)───────────▶ log as "no contract found", keep manual
 ```
 
-## Build order (do not reorder)
-1. `src/schema.py`        — Pydantic models. The contract between stages. (built)
-2. `src/generate_data.py` — messy contract sources + non-catalog orders. (built)
-3. `src/corpus.py`        — ingest messy sources -> queryable price index + retrieval. (built, ONE todo)
-4. `src/agent.py`         — reverse-map: retrieve -> adjudicate -> gate -> recover. (YOUR CORE)
-5. `src/recovery.py`      — list-vs-contract dollar math + idempotent ledger. (built)
-6. `app.py`              — optional Streamlit (day 4 only, skippable).
+## Layout
+```
+src/schema.py      Pydantic models. The contract between stages, plus provenance.
+src/config.py      Model tiers, thresholds, budgets. ALL tunables live here.
+src/prompts.py     System prompt (the cached prefix) + per-order suffix + schema.
+src/guardrails.py  Input sanitising, output validation, escalation policy.
+src/llm.py         The gateway. The ONLY place a model is called.
+src/corpus.py      Messy sources -> one price index + semantic retrieval.
+src/agent.py       The reverse-map graph and the confidence policy.
+src/recovery.py    Dollar math + idempotent, audited ledger.
+evals/             Labelled set + metrics + threshold sweep.
+```
 
-## Where YOUR learning lives (# TODO(you))
-- `src/corpus.py`  -> the embedding/similarity call for candidate retrieval.
-- `src/agent.py`   -> node_reverse_map (the adjudication + confidence policy),
-                      route_after_map (branching), build_graph (LangGraph wiring).
-Write these yourself FIRST, then ask the AI to critique. Defending these is the
-entire point of the demo.
+## Invariants — do not break these
+- **No price ever enters a prompt.** The model decides whether two items are the
+  same; `(list - contract) x qty` is plain Python. Any change that puts a dollar
+  figure in front of the model breaks the auditability of every claim.
+- **The model picks an index, not a SKU.** It chooses from a shortlist it did not
+  select. `guardrails.validate_verdict` cross-checks the echoed SKU against the
+  one actually shown at that index. This caps the blast radius of prompt injection.
+- **Failure abstains, never no-matches.** A timeout, refusal, or malformed verdict
+  becomes UNCERTAIN with a flag — never NO_MATCH, which would silently drop money.
+- **A guardrail flag outranks confidence.** Anything flagged escalates at any
+  confidence. See `agent.decide()`; the check order there is load-bearing.
+- **All model calls go through `llm.adjudicate()`.** Do not construct an
+  `Anthropic()` client anywhere else — it bypasses the call log, and a claim with
+  no provenance is not defensible.
+- **`agent.decide()` stays pure.** The eval harness replays it across a threshold
+  grid to produce the precision-vs-escalation curve without re-calling the API.
 
-## Interview tradeoffs to be ready to defend
-- corpus:   why a retrieval step before the LLM? (cost/latency/grounding) Why
-            keep the deterministic price math OUT of the LLM?
-- agent:    fuzzy match across messy text — how do you avoid false positives?
+## Tradeoffs to be able to defend
+- corpus:   why retrieve before the LLM? (grounding / cost / latency) Why keep the
+            deterministic price math OUT of the LLM?
+- agent:    fuzzy match across messy text - how do you avoid false positives?
             (a wrong contract match = a false recovery claim against a vendor =
             expensive + trust-destroying). How is confidence derived & gated?
+- prompts:  why is the system prompt LONG? (caching does not engage below 1024
+            tokens; a terse prompt is uncacheable AND weaker on domain shorthand)
+- evals:    why not report accuracy? (the two error types are not symmetric)
 - recovery: idempotency + audit — why does a recovery claim need a paper trail?
 - forward:  recovery (backward) vs monitor (forward) — same engine, two modes.
 
@@ -63,6 +81,10 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 export ANTHROPIC_API_KEY=...
 python -m src.generate_data
-python main.py            # runs reverse-map over all non-catalog orders
-pytest -q                 # deterministic layers, no key needed
+
+python main.py                      # backward scan, then the review queue
+python main.py --preflight          # cache eligibility check, makes no calls
+python -m evals.run_eval --offline  # guardrail + retrieval checks, no key
+python -m evals.run_eval --sweep    # full eval + threshold curve
+pytest -q                           # deterministic layers, no key needed
 ```

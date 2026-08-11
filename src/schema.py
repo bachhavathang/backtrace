@@ -59,6 +59,37 @@ class ReverseMapResult(BaseModel):
     quantity: Optional[float] = None
     human_confirmed: Optional[bool] = None
 
+    # --- Provenance ------------------------------------------------------
+    # A recovery claim is a financial assertion against a vendor. When it is
+    # disputed, "the model said so" is not an answer — you have to be able to
+    # name which model, which prompt, and which contract lines were on the table
+    # at the moment the decision was made. These fields are written straight
+    # through to the ledger by recovery.record_recovery().
+    model: Optional[str] = None
+    tier: Optional[str] = None
+    prompt_version: Optional[str] = None
+    corpus_version: Optional[str] = None
+    candidates_considered: list[str] = Field(default_factory=list)
+    guardrail_flags: list[str] = Field(default_factory=list)
+    latency_ms: Optional[float] = None
+    cost_usd: Optional[float] = None
+
+    @property
+    def needs_human_review(self) -> bool:
+        """UNCERTAIN lines that no human has ruled on yet."""
+        return self.decision == MatchDecision.UNCERTAIN and self.human_confirmed is None
+
+    @property
+    def blocked_by_guardrail(self) -> bool:
+        """True when a guardrail (not the model's own judgement) forced escalation.
+
+        Separates 'the agent was genuinely unsure' from 'something went wrong' —
+        a transport failure and a near-duplicate glove contract both land in
+        UNCERTAIN, but they need different follow-up.
+        """
+        from .guardrails import ESCALATING_FLAGS
+        return any(f in ESCALATING_FLAGS for f in self.guardrail_flags)
+
     @property
     def recoverable(self) -> float:
         """Dollars recoverable = (list - contracted) * qty, if we have a match."""
