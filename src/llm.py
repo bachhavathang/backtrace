@@ -43,6 +43,7 @@ import anthropic
 
 from . import config, guardrails, prompts
 from .config import Tier
+from .schema import CandidateMatch, ContractPrice
 
 
 # --- Client ---------------------------------------------------------------
@@ -361,16 +362,77 @@ def _fail(record: CallRecord, clean: guardrails.SanitizedText, error_type: str,
     return verdict, record
 
 
+# --- Cache warm-up --------------------------------------------------------
+
+# A throwaway shortlist. The verdict is discarded; the only thing this call is
+# for is getting the system prefix written into the cache.
+_WARM_CANDIDATES = [CandidateMatch(
+    contract=ContractPrice(sku="WARM-0000", description="cache warm probe",
+                           contracted_unit_price=0.0, vendor="n/a",
+                           source="cache warm-up"),
+    similarity=0.0,
+)]
+
+
+def warm_cache(tiers=(), batch_size: int = 0) -> int:
+    """Serialize one call per tier so the cached prefix exists before the fan-out.
+
+    The problem this solves is invisible without the call log. A scan starts N
+    workers at once, so the opening N calls all leave before any of them has
+    written the prefix to the cache — every one of them is billed at full price.
+    Measured on a 41-case eval: 8 workers, ~50% cache hit rate. The prefix is
+    ~1,600-2,100 tokens, so those misses are the bulk of the input spend.
+
+    Warming costs one full-price call per tier and then makes every later call
+    ~10x cheaper on the prefix, which is why it is gated on `batch_size`. On a
+    six-order scan two warm-up calls cost more than they save; the payback point
+    is config.CACHE_WARM_MIN_BATCH. Below it this is a no-op and returns 0.
+
+    Never raises — adjudicate() already swallows every failure mode, and a scan
+    must not die because an optimisation did.
+    """
+    if not config.ENABLE_PROMPT_CACHING or batch_size < config.CACHE_WARM_MIN_BATCH:
+        return 0
+    warmed = 0
+    seen: set[str] = set()
+    for tier in tiers or (config.FAST, config.PRECISE):
+        # Deduped by model, not by Tier: Tier carries a request_kwargs dict, so
+        # it is not hashable. One prefix is cached per model, so model is the
+        # correct key anyway.
+        if tier.model in seen:
+            continue
+        seen.add(tier.model)
+        # Skip tiers whose prefix cannot clear their own model's minimum. Warming
+        # one of those is strictly waste: a full-price call that writes nothing.
+        # This is why the minimum has to be per tier — Haiku 4.5's is 4x Sonnet's.
+        try:
+            if not preflight(tier)["caching_will_engage"]:
+                continue
+        except Exception:  # noqa: BLE001 - an optimisation must never break a scan
+            continue
+        _, record = adjudicate("__cache_warm__", "cache warm probe",
+                               _WARM_CANDIDATES, tier)
+        # Logged under its own order id rather than hidden, so the cost of the
+        # optimisation shows up in the same ledger that proves it paid off.
+        warmed += 1 if record.ok else 0
+    return warmed
+
+
 # --- Preflight ------------------------------------------------------------
 
 def preflight(tier: Tier | None = None) -> dict:
     """Measure the cached prefix and report whether caching will actually engage.
 
     Worth its own function because this is the failure mode you cannot see: when
-    the cacheable prefix is under the model's minimum (1024 tokens on Sonnet 5 and
-    Haiku 4.5), the API does not reject the cache_control marker. It accepts the
-    request, ignores the marker, and bills every call at full price. The only
-    signals are this count up front and cache_read_input_tokens afterwards.
+    the cacheable prefix is under the model's minimum, the API does not reject the
+    cache_control marker. It accepts the request, ignores the marker, and bills
+    every call at full price. The only signals are this count up front and
+    cache_read_input_tokens afterwards.
+
+    The minimum is PER MODEL and is not monotonic across generations — Sonnet 5
+    caches from 1024 tokens, Haiku 4.5 needs 4096. Comparing both tiers against
+    one global constant is what made this check report a false positive on the
+    fast tier while that tier was in fact never caching at all.
     """
     tier = tier or config.PRECISE
     counted = get_client().messages.count_tokens(
@@ -379,19 +441,20 @@ def preflight(tier: Tier | None = None) -> dict:
         messages=[{"role": "user", "content": "probe"}],
     )
     system_tokens = counted.input_tokens
-    eligible = system_tokens >= config.CACHE_MIN_PREFIX_TOKENS
+    minimum = tier.cache_min_prefix_tokens
+    eligible = system_tokens >= minimum
     return {
         "model": tier.model,
         "prompt_version": prompts.PROMPT_VERSION,
         "cached_prefix_tokens": system_tokens,
-        "cache_minimum_tokens": config.CACHE_MIN_PREFIX_TOKENS,
+        "cache_minimum_tokens": minimum,
         "caching_will_engage": eligible and config.ENABLE_PROMPT_CACHING,
         "note": (
             "Prefix clears the minimum; expect cache_read_input_tokens > 0 from "
             "the second call onward."
             if eligible else
-            f"Prefix is {config.CACHE_MIN_PREFIX_TOKENS - system_tokens} tokens "
-            "short of the cache minimum. The marker will be silently ignored and "
-            "every call billed at full input price."
+            f"Prefix is {minimum - system_tokens} tokens short of this model's "
+            "cache minimum. The marker is silently ignored and every call bills "
+            "at full input price."
         ),
     }

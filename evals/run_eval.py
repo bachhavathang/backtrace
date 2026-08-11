@@ -51,7 +51,7 @@ from src import config, guardrails  # noqa: E402
 from src.agent import decide  # noqa: E402
 from src.config import RETRIEVAL_K, THRESHOLDS, Thresholds, pick_tier  # noqa: E402
 from src.corpus import build_corpus, retrieve_semantic, warm_retrieval  # noqa: E402
-from src.llm import ACCOUNT, adjudicate  # noqa: E402
+from src.llm import ACCOUNT, adjudicate, warm_cache  # noqa: E402
 from src.schema import MatchDecision, OrderLine  # noqa: E402
 
 DATASET = Path(__file__).resolve().parent / "dataset.json"
@@ -447,6 +447,9 @@ def main() -> None:
     print(f"Evaluating {len(cases)} cases with {args.workers} workers...")
     warm_retrieval()
     ACCOUNT.reset()
+    # Before the fan-out, not after: N workers starting together would otherwise
+    # all miss the prefix cache. Counted in ACCOUNT like any other call.
+    warm_cache(batch_size=len(cases))
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         records = list(pool.map(evaluate_case, cases))

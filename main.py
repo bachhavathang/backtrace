@@ -50,6 +50,12 @@ def scan(orders: list[OrderLine], workers: int) -> list[ReverseMapResult]:
     """Adjudicate every order. Concurrent, non-blocking, order-preserving output."""
     results: dict[str, ReverseMapResult] = {}
 
+    if workers > 1:
+        # Sequential mode needs no warm-up: call 1 primes the cache for call 2
+        # on its own. Only a fan-out can race itself into paying full price N
+        # times, so only a fan-out pays for the fix.
+        llm.warm_cache(batch_size=len(orders))
+
     if workers <= 1:
         for order in orders:
             results[order.order_id] = run_one(order, interactive=False)

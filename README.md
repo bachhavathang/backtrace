@@ -133,7 +133,7 @@ $1,000 auto-matched, plus $1,450 from the human-resolved PO-5004).
 
 The deterministic layers are unit-tested; the adjudicator is a judgement call over
 messy text, so it is **evaluated against a labelled set** rather than asserted on.
-39 cases in `evals/dataset.json`, weighted toward the cases that produce false
+41 cases in `evals/dataset.json`, weighted toward the cases that produce false
 claims rather than the easy ones:
 
 | Category | n | What it tests |

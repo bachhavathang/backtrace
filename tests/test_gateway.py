@@ -233,3 +233,100 @@ def test_every_call_is_logged_even_when_it_fails(monkeypatch, tmp_path):
     assert entries[0]["error_type"] == "connection"
     assert entries[0]["prompt_version"] == prompts.PROMPT_VERSION
     assert entries[0]["model"] == config.FAST.model
+
+
+# --- Cache warm-up --------------------------------------------------------
+# The fan-out races itself: N workers all leave before any of them has written
+# the prefix to the cache, so all N are billed at full price. These tests pin
+# the fix and, just as importantly, pin when it declines to run.
+
+def _counting_client(monkeypatch, prefix_tokens=99_999):
+    """Fake client that counts create() calls. `prefix_tokens` drives preflight,
+    which warm_cache consults to skip tiers that cannot cache."""
+    calls = []
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return _fake_response(
+                text='{"chosen_index": 1, "chosen_sku": "WARM-0000", '
+                     '"confidence": 0.1, "is_ambiguous": true, "reason": "warm"}')
+
+        def count_tokens(self, **kwargs):
+            return SimpleNamespace(input_tokens=prefix_tokens)
+
+    monkeypatch.setattr(llm, "get_client", lambda: SimpleNamespace(messages=FakeMessages()))
+    return calls
+
+
+def test_warm_cache_primes_each_tier_once(monkeypatch):
+    calls = _counting_client(monkeypatch)
+    warmed = llm.warm_cache(batch_size=config.CACHE_WARM_MIN_BATCH)
+    assert warmed == 2
+    assert {c["model"] for c in calls} == {config.FAST.model, config.PRECISE.model}
+
+
+def test_warm_cache_declines_below_the_payback_point(monkeypatch):
+    # A six-order scan would spend more on warming than warming saves.
+    calls = _counting_client(monkeypatch)
+    assert llm.warm_cache(batch_size=config.CACHE_WARM_MIN_BATCH - 1) == 0
+    assert calls == []
+
+
+def test_warm_cache_is_a_noop_when_caching_is_off(monkeypatch):
+    calls = _counting_client(monkeypatch)
+    monkeypatch.setattr(config, "ENABLE_PROMPT_CACHING", False)
+    assert llm.warm_cache(batch_size=1000) == 0
+    assert calls == []
+
+
+def test_warm_cache_does_not_call_the_same_tier_twice(monkeypatch):
+    calls = _counting_client(monkeypatch)
+    assert llm.warm_cache(tiers=(config.FAST, config.FAST), batch_size=1000) == 1
+    assert len(calls) == 1
+
+
+def test_warm_call_actually_carries_the_cache_breakpoint(monkeypatch):
+    # A warm-up that did not set cache_control would cost money and warm nothing.
+    calls = _counting_client(monkeypatch)
+    llm.warm_cache(tiers=(config.FAST,), batch_size=1000)
+    assert calls[0]["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_warm_cache_skips_a_tier_that_cannot_cache(monkeypatch):
+    # 2000 tokens clears Sonnet's 1024 minimum but not Haiku's 4096. Warming the
+    # fast tier there would be a full-price call that writes nothing.
+    calls = _counting_client(monkeypatch, prefix_tokens=2000)
+    assert llm.warm_cache(batch_size=1000) == 1
+    assert [c["model"] for c in calls] == [config.PRECISE.model]
+
+
+# --- Per-model cache minimums ---------------------------------------------
+# The regression that motivated these: a single global minimum of 1024 was applied
+# to both tiers, so preflight reported "will engage True" for Haiku 4.5 while that
+# tier silently never cached. A false positive here is worse than no check at all.
+
+def test_haiku_and_sonnet_have_different_cache_minimums():
+    assert config.FAST.cache_min_prefix_tokens == 4096
+    assert config.PRECISE.cache_min_prefix_tokens == 1024
+
+
+def test_preflight_uses_the_tier_minimum_not_a_global_one(monkeypatch):
+    _counting_client(monkeypatch, prefix_tokens=1586)  # the real measured prefix
+    fast = llm.preflight(config.FAST)
+    precise = llm.preflight(config.PRECISE)
+    assert fast["cache_minimum_tokens"] == 4096
+    assert fast["caching_will_engage"] is False
+    assert "2510 tokens short" in fast["note"]
+    assert precise["cache_minimum_tokens"] == 1024
+    assert precise["caching_will_engage"] is True
+
+
+def test_warm_call_never_reaches_the_ledger(monkeypatch, tmp_path):
+    import json
+    _counting_client(monkeypatch)
+    llm.warm_cache(tiers=(config.FAST,), batch_size=1000)
+    entries = [json.loads(line) for line in
+               (tmp_path / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+    # Logged under its own id: the optimisation's cost is visible, not hidden.
+    assert entries[0]["order_id"] == "__cache_warm__"

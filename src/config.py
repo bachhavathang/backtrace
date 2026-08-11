@@ -101,6 +101,11 @@ class Tier:
     input_usd_per_mtok: float
     output_usd_per_mtok: float
     request_kwargs: dict
+    # Minimum cacheable prefix, which is PER MODEL and is not monotonic across
+    # generations — Sonnet 5 caches from 1024 tokens, Haiku 4.5 needs 4096. A
+    # single global constant here silently mis-reports one of them; see
+    # CACHE_MIN_PREFIX_TOKENS below.
+    cache_min_prefix_tokens: int
 
     def cost_usd(self, input_tokens: int, output_tokens: int,
                  cache_read_tokens: int = 0, cache_write_tokens: int = 0) -> float:
@@ -126,6 +131,11 @@ FAST = Tier(
     output_usd_per_mtok=5.00,
     # Haiku 4.5 does not accept `effort`; sending it is a 400.
     request_kwargs={},
+    # 4096, not 1024. This is the highest minimum of any current model and the
+    # reason the fast tier never cached: our ~1,600-token prefix clears Sonnet's
+    # bar and is nowhere near Haiku's. Measured, not assumed — every fast-tier
+    # call in data/logs/llm_calls.jsonl had cache_write=0 and cache_read=0.
+    cache_min_prefix_tokens=4096,
 )
 
 PRECISE = Tier(
@@ -138,6 +148,7 @@ PRECISE = Tier(
         "thinking": {"type": "disabled"},
         "output_config": {"effort": "low"},
     },
+    cache_min_prefix_tokens=1024,
 )
 
 TIERS = {t.name: t for t in (FAST, PRECISE)}
@@ -197,8 +208,29 @@ LOG_PROMPTS = True
 # Prompt caching only pays off above a model-specific minimum prefix (1024
 # tokens on Sonnet 5 / Haiku 4.5). Below it the API silently declines to cache.
 # preflight() in llm.py checks this and warns rather than assuming.
-CACHE_MIN_PREFIX_TOKENS = 1024
+# Kept only as the floor used when a tier is unknown. The real minimum is
+# PER MODEL and lives on Tier.cache_min_prefix_tokens.
+#
+# This constant used to be the only one, applied to both tiers, and it was the
+# bug: it said 1024 for Haiku 4.5, whose real minimum is 4096. preflight()
+# compared the fast tier's 1,586-token prefix against 1024, reported
+# "will engage True", and every fast-tier call then silently billed at full
+# price. The check built specifically to catch silent cache failure produced a
+# false positive, which is the worst possible failure for that check — the call
+# log was the only thing that showed the truth (cache_write=0, forever).
+#
+# The minimum is not monotonic across model generations, so it can never be a
+# single number: a prompt that caches on Sonnet 5 may silently not cache on
+# Haiku 4.5 even though Haiku is the newer, cheaper model.
+CACHE_MIN_PREFIX_TOKENS = 4096
 ENABLE_PROMPT_CACHING = True
+
+# Batch size at which warming the cache starts paying for itself. A warm-up costs
+# one full-price call per tier; each later call then saves ~90% on a ~1,600-2,100
+# token prefix. Below this many lines the warm-up costs more than it saves, so
+# llm.warm_cache() declines to run. Set from the observed ~50% hit rate on a
+# 41-case eval fanned out across MAX_CONCURRENCY workers.
+CACHE_WARM_MIN_BATCH = 12
 
 
 # --- Guardrail limits ----------------------------------------------------
