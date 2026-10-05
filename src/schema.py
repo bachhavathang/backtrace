@@ -40,6 +40,10 @@ class ContractPrice(BaseModel):
     contract_id: Optional[str] = None
     holder: Optional[str] = None     # who the price binds: the manufacturer, not
                                      # necessarily who invoiced (a distributor)
+    manufacturer: Optional[str] = None   # who made it, per the device registry (GUDID);
+                                         # differs from holder when a reseller holds the contract
+    product_group: Optional[str] = None  # device nomenclature term (GMDN); identical
+                                         # products from different sellers share it
 
     # --- When the price applies -----------------------------------------
     effective_start: Optional[date] = None   # None = open-ended

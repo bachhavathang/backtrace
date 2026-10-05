@@ -37,10 +37,11 @@ import re
 import threading
 
 from .config import CORPUS_SOURCE
-from .ingest import merge_amendments, sources_for, vet
+from .ingest import IngestReport, load_all, sources_for
 from .schema import CandidateMatch, ContractPrice
 
 _corpus: list[ContractPrice] | None = None
+_report: IngestReport | None = None
 _corpus_lock = threading.Lock()
 
 
@@ -58,16 +59,21 @@ def build_corpus(refresh: bool = False) -> list[ContractPrice]:
     re-regex-parsed three files N times before doing any useful work. Contracts
     do not change during a scan; pass refresh=True if they did.
     """
-    global _corpus
+    global _corpus, _report
     if _corpus is not None and not refresh:
         return _corpus
 
     with _corpus_lock:
         if _corpus is not None and not refresh:
             return _corpus
-        rows = [vet(row) for source in sources_for(CORPUS_SOURCE) for row in source.load()]
-        _corpus = merge_amendments(rows)
+        _corpus, _report = load_all(sources_for(CORPUS_SOURCE))
     return _corpus
+
+
+def ingest_report() -> IngestReport:
+    """What the last build_corpus() read, kept, dropped and flagged."""
+    build_corpus()
+    return _report
 
 
 def corpus_version(corpus: list[ContractPrice] | None = None) -> str:
@@ -77,13 +83,25 @@ def corpus_version(corpus: list[ContractPrice] | None = None) -> str:
     addendum in this very corpus moves CTH-F16 from $4.20 to $3.60 — so a claim
     has to record which version of the index it was computed against, or you
     cannot explain a year later why two claims for the same SKU differ.
+
+    Units, dates and the verification flag change what a claim is worth, so they
+    are hashed too — but only when set, which keeps the hash of a corpus that
+    has none of them (the synthetic one) identical to what older claims carry.
     """
     corpus = corpus if corpus is not None else build_corpus()
     payload = "|".join(
-        f"{c.sku}:{c.contracted_unit_price}:{c.source}"
-        for c in sorted(corpus, key=lambda c: c.sku)
+        f"{c.sku}:{c.contracted_unit_price}:{c.source}" + _hash_extras(c)
+        for c in sorted(corpus, key=lambda c: (c.sku, c.source))
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _hash_extras(c: ContractPrice) -> str:
+    extras = [f"{name}={value}" for name, value in (
+        ("uom", c.uom), ("pack", c.units_per_pack), ("from", c.effective_start),
+        ("to", c.effective_end), ("unverified", c.needs_verification or None),
+    ) if value is not None]
+    return (":" + ",".join(extras)) if extras else ""
 
 
 # --- Retrieval -----------------------------------------------------------

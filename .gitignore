@@ -16,3 +16,7 @@ evals/results/
 
 # Personal files that live in the working directory but are not part of the project.
 Athang_Bachhav_CV.*
+
+# Harvested real data: large, re-fetchable, and dated. The manifest inside each
+# snapshot records what was fetched; tests use tests/fixtures/ instead.
+data/raw/

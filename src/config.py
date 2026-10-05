@@ -193,6 +193,11 @@ RETRIEVAL_K = 3
 # rolled back by unsetting one variable.
 CORPUS_SOURCE = os.environ.get("BACKTRACE_CORPUS_SOURCE", "synthetic")
 
+# Harvested real data (gitignored). "real" reads BACKTRACE_SNAPSHOT if set, else the
+# newest dated folder here. Snapshots are immutable: a scan names the files it read.
+RAW_DATA = DATA / "raw"
+SNAPSHOT = os.environ.get("BACKTRACE_SNAPSHOT")
+
 
 # --- Gateway behaviour ---------------------------------------------------
 

@@ -118,8 +118,10 @@ class SanitizedText:
 _FENCE_TAG = re.compile(r"</?\s*(order_text|contract_lines)\s*>", re.IGNORECASE)
 
 # What a SKU may look like. It is printed into the prompt and echoed back by the
-# model, so a "SKU" carrying spaces or punctuation is a payload, not a part number.
-SKU_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/#-]{0,63}")
+# model, so a "SKU" carrying prompt syntax (| = " < >) is a payload, not a part
+# number. Single spaces between tokens are allowed: real VA catalog numbers look
+# like "SILQ 21400101003", and forbidding them flagged 3 of 22 real lines.
+SKU_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._/#()+-]| (?=[A-Za-z0-9])){0,63}")
 
 
 def _sanitize(raw: str, max_chars: int, truncated_flag: str | None) -> SanitizedText:
