@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
-from .schema import ReverseMapResult
+from .schema import ContractPrice, OrderLine, ReverseMapResult
 
 LEDGER = Path(__file__).resolve().parent.parent / "data" / "mock_systems" / "recovery_ledger.json"
 
@@ -74,3 +76,106 @@ def record_recovery(result: ReverseMapResult) -> dict:
 
 def total_recovered() -> float:
     return round(sum(e["recoverable"] for e in _load()), 2)
+
+
+# --- Which contract price a claim uses -----------------------------------
+#
+# The model decides WHAT was bought. This decides WHAT IT SHOULD HAVE COST, and
+# it is plain Python on purpose: a price policy has to be reproducible from the
+# ledger alone. Settled in docs/WORKING_STATE.md §5.2 (Decision 1). Pure — no
+# clock, no I/O — so it can be replayed like agent.decide().
+
+CLAIMABLE = "claimable"
+NEEDS_REVIEW = "needs_review"
+EXPIRED = "expired"
+NO_VALID_CONTRACT = "no_valid_contract"
+
+
+@dataclass
+class PriceSelection:
+    status: str
+    chosen: Optional[ContractPrice] = None   # the price an automatic claim uses
+    lowest: Optional[ContractPrice] = None   # the most the hospital may be owed
+    valid: list[ContractPrice] = field(default_factory=list)
+    reason: str = ""
+    gap: float = 0.0   # chosen - lowest, in the unit they were compared in
+
+    @property
+    def has_additional(self) -> bool:
+        """True when a lower valid price exists — a top-up for a human to approve."""
+        return self.gap > 0
+
+
+def _same_party(a: Optional[str], b: Optional[str]) -> bool:
+    # Exact match after case and whitespace folding. Real vendor names need entity
+    # resolution ("Medline Industries, LP" vs "MEDLINE IND"); until that exists a
+    # near-miss must fail closed and go to a human, not fuzzy-match into a claim.
+    return bool(a and b) and " ".join(a.split()).casefold() == " ".join(b.split()).casefold()
+
+
+def _unit_key(row: ContractPrice):
+    return (row.uom.casefold() if row.uom else None, row.units_per_pack)
+
+
+def select_contract_price(order: OrderLine, rows: list[ContractPrice],
+                          as_of: date) -> PriceSelection:
+    """Pick the contract price for an order from every row pricing the matched product.
+
+    1. Keep rows whose holder is the order's MANUFACTURER — the contract binds the
+       maker, even when a distributor invoiced.
+    2. Keep rows in force on the order's effective date.
+    3. If several remain, the automatic claim uses the HIGHEST: the smallest claim,
+       the one a vendor cannot dispute. The gap to the lowest is reported, not
+       claimed. A false claim is worse than a missed one.
+    4. If the claim window has closed by `as_of`, the money is EXPIRED, not
+       recoverable.
+
+    Anything this cannot establish — an unknown manufacturer, a manufacturer with
+    no contract under that exact name, an unknown date against a dated contract,
+    prices in units that cannot be compared — returns
+    NEEDS_REVIEW. Unknown never becomes a claim and never becomes "no contract".
+    """
+    if not order.manufacturer:
+        return PriceSelection(NEEDS_REVIEW, reason="order has no manufacturer")
+
+    held = [r for r in rows if _same_party(r.holder or r.vendor, order.manufacturer)]
+    if not held:
+        # Not NO_VALID_CONTRACT: with exact name matching, "Medline Industries" vs
+        # "Medline" lands here too, and calling that "no contract" drops the money
+        # silently. A human tells a name mismatch from a genuine other-maker price.
+        others = sorted({r.holder or r.vendor for r in rows})
+        return PriceSelection(NEEDS_REVIEW, valid=[],
+                              reason=f"no contract held by {order.manufacturer!r}; "
+                                     f"held by {others}")
+
+    if order.effective_date is None:
+        if any(r.effective_start or r.effective_end for r in held):
+            return PriceSelection(NEEDS_REVIEW, valid=held,
+                                  reason="order has no date; contracts are dated")
+        valid = held
+    else:
+        valid = [r for r in held if r.in_force_on(order.effective_date)]
+        if not valid:
+            return PriceSelection(NO_VALID_CONTRACT,
+                                  reason=f"no contract in force on {order.effective_date}")
+
+    if len(valid) == 1:
+        price = lambda r: r.contracted_unit_price  # noqa: E731
+    elif all(r.per_each_price is not None for r in valid):
+        price = lambda r: r.per_each_price  # noqa: E731
+    elif len({_unit_key(r) for r in valid}) == 1:
+        price = lambda r: r.contracted_unit_price  # noqa: E731
+    else:
+        return PriceSelection(NEEDS_REVIEW, valid=valid,
+                              reason="contract prices are in units that cannot be compared")
+
+    chosen = max(valid, key=price)
+    lowest = min(valid, key=price)
+    gap = price(chosen) - price(lowest)
+
+    if (order.effective_date and chosen.claim_window_days is not None
+            and as_of > order.effective_date + timedelta(days=chosen.claim_window_days)):
+        return PriceSelection(EXPIRED, chosen=chosen, lowest=lowest, valid=valid, gap=gap,
+                              reason=f"claim window of {chosen.claim_window_days} days closed")
+
+    return PriceSelection(CLAIMABLE, chosen=chosen, lowest=lowest, valid=valid, gap=gap)

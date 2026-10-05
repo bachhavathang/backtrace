@@ -8,6 +8,7 @@ second to the first.
 """
 from __future__ import annotations
 
+from datetime import date
 from enum import Enum
 from typing import Optional
 
@@ -19,12 +20,67 @@ class ContractPrice(BaseModel):
 
     Note `source` — provenance matters. When you claim a recovery against a
     vendor, you must be able to point at WHICH document set the contracted price.
+
+    Every field below `source` is optional and defaults to "unknown". The
+    hand-written synthetic corpus cannot supply most of them; real contract data
+    (docs/WORKING_STATE.md §5) can, and the price policy in
+    recovery.select_contract_price() treats "unknown" conservatively rather than
+    guessing. None of them reaches a prompt.
     """
     sku: str
     description: str
     contracted_unit_price: float
     vendor: str
     source: str  # e.g. "GPO overlay 2025", "Local agreement - Acme", "Email addendum 4/12"
+
+    # --- Contract identity ----------------------------------------------
+    # One SKU can sit on several contracts at different prices, and two vendors
+    # can reuse one part number. A row is identified by (holder, sku, contract),
+    # never by SKU alone — see identity_key.
+    contract_id: Optional[str] = None
+    holder: Optional[str] = None     # who the price binds: the manufacturer, not
+                                     # necessarily who invoiced (a distributor)
+
+    # --- When the price applies -----------------------------------------
+    effective_start: Optional[date] = None   # None = open-ended
+    effective_end: Optional[date] = None
+    claim_window_days: Optional[int] = None  # how long after invoice a claim is allowed
+
+    # --- Unit of measure ------------------------------------------------
+    # $9.10 per box of 100 and $0.15 each are not comparable until normalised.
+    uom: Optional[str] = None                # "each", "box", "case", ...
+    units_per_pack: Optional[int] = Field(None, gt=0)
+
+    # --- Ingest-side trust ----------------------------------------------
+    source_text: Optional[str] = None        # verbatim, before any cleaning; audit only
+    needs_verification: bool = False         # set by ingest-side sanitising
+
+    @property
+    def identity_key(self) -> tuple[str, str, str]:
+        """(holder, sku, contract) — rows sharing a key are amendments of each other."""
+        return ((self.holder or self.vendor).casefold(), self.sku,
+                self.contract_id or self.source)
+
+    @property
+    def per_each_price(self) -> Optional[float]:
+        """Contract price per single unit, or None when the unit is unknown.
+
+        None is the honest answer for a box price with no pack size: dividing by a
+        guess is how a $9.10 box becomes a $9.10 glove and a 100x false claim.
+        """
+        if self.units_per_pack:
+            return self.contracted_unit_price / self.units_per_pack
+        if self.uom and self.uom.casefold() in ("each", "ea"):
+            return self.contracted_unit_price
+        return None
+
+    def in_force_on(self, day: date) -> bool:
+        """True when `day` falls inside the effective window. Unknown bounds are open."""
+        if self.effective_start and day < self.effective_start:
+            return False
+        if self.effective_end and day > self.effective_end:
+            return False
+        return True
 
 
 class OrderLine(BaseModel):
@@ -37,6 +93,12 @@ class OrderLine(BaseModel):
     quantity: float
     list_unit_price: float          # what the hospital actually paid (off-contract)
     sku_hint: Optional[str] = None  # sometimes a partial/garbled code is present
+
+    # Hospitals usually buy a manufacturer's product through a distributor. The
+    # contract binds the manufacturer; the claim goes to whoever invoiced.
+    supplier: Optional[str] = None       # who billed the hospital — the claim's addressee
+    manufacturer: Optional[str] = None   # who made it — matched against ContractPrice.holder
+    effective_date: Optional[date] = None  # the date that prices this order
 
 
 class MatchDecision(str, Enum):

@@ -368,6 +368,23 @@ automatic claim holds up.
 Decision 1's price-selection rule and adjustment entries land with PR 1 (logic) and
 row 1 of the migration table (DB ledger).
 
+**PR 1 status (2026-10-05, branch `step1-pr1-schema-adapter`):** schema fields,
+`src/ingest.py` (`ContractSource`, synthetic sources, `merge_amendments` keyed on
+`identity_key`), `config.CORPUS_SOURCE` (env `BACKTRACE_CORPUS_SOURCE`), and
+`recovery.select_contract_price()` — pure, tested, **not yet wired** into the agent
+(it needs the product-grouped shortlist from PR 3). Synthetic corpus rows, order and
+`corpus_version` (`ae5a7592a43d`) pinned unchanged. 129 tests pass.
+
+Carried forward from PR 1:
+- `agent.candidates_for()` and the human gate look contracts up **by SKU**
+  (`{c.sku: c for c in build_corpus()}`). Correct while SKUs are unique; wrong once
+  one SKU sits on two contracts. Re-key on `identity_key` in PR 3.
+- `corpus_version` still hashes `sku:price:source` only. Add dates, units and
+  flag/clearance state (Decision 2) when those fields carry real data.
+- Holder matching is exact after case/whitespace folding; a near-miss goes to a
+  human. Vendor entity resolution is PR 3 work.
+- Adjustment entries in the ledger are not built — waiting on the DB ledger (row 1).
+
 ---
 
 ## 6. Housekeeping / loose ends
