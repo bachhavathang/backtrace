@@ -13,3 +13,6 @@ data/mock_systems/recovery_ledger.json
 # LLM call log: full prompt/response provenance, regenerated on every scan.
 data/logs/
 evals/results/
+
+# Personal files that live in the working directory but are not part of the project.
+Athang_Bachhav_CV.*

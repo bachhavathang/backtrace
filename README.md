@@ -83,6 +83,15 @@ Claims are keyed on order ID — re-running the scan never double-counts. Every
 claim records the matched SKU, the source document, both prices, the confidence,
 and whether a human confirmed it.
 
+*Stated precisely:* idempotency here holds **within one process**, enforced by a
+lock around the read-check-append. That is the right guarantee for a scan that runs
+in one process, and it is not the guarantee a claim actually needs — two workers, a
+retried queue message, or a redeployed task would each defeat it. The invariant
+belongs in a database unique constraint, not a mutex; that is the first row of the
+[migration table](docs/PRODUCTION_DESIGN.md#14-migration-this-design-as-diffs-to-this-repository),
+and it is a correctness bug rather than an enhancement. A double claim against a
+vendor is worse than a missed one.
+
 
 ## Why retrieve-then-judge (a concrete failure)
 
@@ -128,6 +137,11 @@ A clean run recovers **$4,450** across the matched orders ($1,320 + $320 + $360 
 $1,000 auto-matched, plus $1,450 from the human-resolved PO-5004).
 
 ## Production concerns, and how each one is handled
+
+What follows is how this repository handles each concern **today**, at six order lines.
+For what the system becomes at 100k lines a scan — architecture, deployment, tenancy,
+compliance, and the ordered migration to get there — see
+[`docs/PRODUCTION_DESIGN.md`](docs/PRODUCTION_DESIGN.md).
 
 ### Evaluation — `evals/`
 
@@ -280,6 +294,21 @@ python main.py --preflight   # reports the real token count vs the cache minimum
 `cache_hit_rate` is in every scan report for the same reason: a silent cache miss
 has no other symptom.
 
+**And then the honest ordering.** Everything in this section is correct and worth
+roughly nothing. Priced against real volumes — 100k order lines, ~45k adjudications
+after the retrieval floor — a full annual scan costs **under $130 of inference, and
+under $70 on the Batch API**. The 26.6% escalation rate over the same scan costs
+**~$13,500 of reviewer time**. Reviewer attention is ~105x the inference bill, and
+one point of escalation rate is worth ~4x the *entire* annual token spend. One
+human review buys ~200 Opus 5 adjudications, which inverts the usual instinct: the
+right move on an uncertain line is to spend *more* inference on it, not to escalate
+it. The derivation, and what it implies for tiering, is
+[§2-3 of the production design](docs/PRODUCTION_DESIGN.md#2-inference-cost-computed-rather-than-assumed).
+
+Token optimisation stays in this README because the cache-minimum trap is a real
+engineering lesson and the retrieval short-circuit is genuinely the largest lever
+here. It is listed under production concerns, not first among them.
+
 ### Latency management
 
 - **Concurrent scan.** Order lines are independent; the scan runs them through a
@@ -348,17 +377,33 @@ src/corpus.py      messy sources -> one price index + semantic retrieval
 src/agent.py       the reverse-map graph and the confidence policy
 src/recovery.py    dollar math + idempotent, audited ledger
 evals/             labelled set + metrics + threshold sweep
+docs/              production design: architecture, deployment, migration
 ```
 
 ## What I'd build next
 
+[`docs/PRODUCTION_DESIGN.md`](docs/PRODUCTION_DESIGN.md) is the full version — what
+this becomes at 100k lines a scan, multi-tenant, on AWS — ending in a table that maps
+each design decision to a file, a diff, and a definition of done. The short list:
+
+- **Idempotency into a database constraint** and `Decimal` money. Both are correctness
+  bugs in the current ledger, not enhancements, which is why they lead the migration.
+- **A third model tier for the escalation band.** If one human review costs ~200 Opus 5
+  adjudications, an uncertain line should buy a stronger model before it buys a person.
+  Gated on the eval: it ships only if escalations fall while false claims stay at 0.
 - **Calibration curve.** Bucket predictions by claimed confidence and check whether
-  0.9-confidence matches are right ~90% of the time. Models are usually
-  overconfident, which is the assumption the current bars rest on.
-- **Batch API for the backward scan.** A historical sweep has nobody waiting on it,
-  so it should take the 50% batch discount; per-call latency only matters in
-  forward-monitor mode.
-- **Item-master write-back** so confirmed matches update the catalog (the
-  "item-master automation" expansion).
-- **Per-vendor match-accuracy tracking** over time, fed from the call log.
-- **A real review UI** on top of the queue, replacing the stdin prompt.
+  0.9-confidence matches are right ~90% of the time. Models are usually overconfident,
+  which is the assumption every threshold in this repo rests on.
+- **Batch API for the backward scan.** A historical sweep has nobody waiting on it, so
+  it should take the 50% discount; per-call latency only matters in forward-monitor
+  mode. An entire annual scan fits inside a single 100k-request batch.
+- **The dispute flywheel.** Every claim a vendor pushes back on is a labelled false
+  positive that the customer already paid for. Feeding withdrawn claims back into
+  `evals/dataset.json` is the only source of training signal about *these* contracts —
+  and the eval set expanding is what caught the last two live defects.
+- **Effective-dated contract prices.** "Newest source wins" can't answer *what was the
+  price on the day this PO was cut* — and the email addendum in the sample corpus moves
+  a SKU from $4.20 to $3.60, so the question is already live in six orders.
+- **Item-master write-back** so confirmed matches update the catalog.
+- **A real review UI** on top of the queue — prioritised by dollars at stake, not
+  arrival order, and grouped by shape so one decision resolves many.
