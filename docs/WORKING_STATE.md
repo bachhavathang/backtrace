@@ -307,7 +307,7 @@ the rest of the design: **a false claim is worse than a missed one.**
 | G18 | **Validation.** | Price > 0, plausible range, required fields present. |
 | G19 | **Reproducibility.** | Snapshot raw files with fetch date + sha256 manifest. Never fetch live in tests/CI. Raw data gitignored; a ~200-row fixture committed. |
 | G20 | **Terms of use.** GUDID is public; CCST scraping terms unchecked. | Check before harvesting; rate-limit. |
-| G21 | **No rollback.** | `CORPUS_SOURCE=synthetic|real`; the 108 tests and current eval stay green, real is opt-in. |
+| G21 | **No rollback.** | `CORPUS_SOURCE` = `synthetic` or `real`; the 108 tests and current eval stay green, real is opt-in. |
 | G22 | **Raw vs cleaned text.** | Embed and prompt on cleaned text; keep raw for audit. |
 | G23 | **Flood attack.** Planting flagged text across popular contracts escalates everything. | Ingest-time review absorbs it; alert on a jump in flagged count per ingest. |
 
