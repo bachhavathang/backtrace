@@ -185,6 +185,15 @@ THRESHOLDS = Thresholds()
 RETRIEVAL_K = 3
 
 
+# --- Corpus source -------------------------------------------------------
+
+# Which contract sources build the price index (see src/ingest.py). "synthetic"
+# is the three hand-written files and stays the default: every test and the
+# current eval are pinned to it. Real sources are opt-in so a bad ingest can be
+# rolled back by unsetting one variable.
+CORPUS_SOURCE = os.environ.get("BACKTRACE_CORPUS_SOURCE", "synthetic")
+
+
 # --- Gateway behaviour ---------------------------------------------------
 
 # Wall-clock ceiling for one adjudication. Short on purpose: this is a small

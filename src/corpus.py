@@ -6,8 +6,8 @@ pipe-delimited GPO table, a prose local-agreement letter, a chatty email that
 changes one price). All of it must become one searchable index.
 
 What lives here:
-  - parsers for each messy source -> a unified list[ContractPrice], newest
-    source winning when two of them price the same SKU
+  - build_corpus(): the configured sources (src/ingest.py) -> one unified
+    list[ContractPrice], with amendments of a contract collapsed
   - two retrievers over that index:
       retrieve_keyword   token overlap. No model, no key — the pipeline and the
                          whole test suite run without either.
@@ -35,56 +35,10 @@ from __future__ import annotations
 import hashlib
 import re
 import threading
-from pathlib import Path
 
+from .config import CORPUS_SOURCE
+from .ingest import merge_amendments, sources_for
 from .schema import CandidateMatch, ContractPrice
-
-CONTRACTS = Path(__file__).resolve().parent.parent / "data" / "contracts"
-
-
-# --- Parsers: each messy source -> ContractPrice rows --------------------
-
-def _parse_gpo_overlay(text: str) -> list[ContractPrice]:
-    rows: list[ContractPrice] = []
-    for line in text.splitlines():
-        parts = [p.strip() for p in line.split("|")]
-        if len(parts) == 4 and parts[0].lower() != "vendor" and not parts[0].startswith("GPO"):
-            vendor, sku, desc, price = parts
-            try:
-                rows.append(ContractPrice(sku=sku, description=desc, vendor=vendor,
-                                          contracted_unit_price=float(price),
-                                          source="GPO overlay 2025"))
-            except ValueError:
-                continue
-    return rows
-
-
-def _parse_local_agreement(text: str) -> list[ContractPrice]:
-    """Prose letter: pull '(Vendor #SKU): $price' style lines."""
-    rows: list[ContractPrice] = []
-    pattern = re.compile(r"-\s*(.+?)\s*\((\w[\w\s]*?)\s*#([\w\-]+)\):\s*\$([\d.]+)")
-    for m in pattern.finditer(text):
-        desc, vendor, sku, price = m.groups()
-        rows.append(ContractPrice(sku=sku.strip(), description=desc.strip(),
-                                  vendor=vendor.strip(),
-                                  contracted_unit_price=float(price),
-                                  source="Local agreement - St. Mark's"))
-    return rows
-
-
-def _parse_email_addendum(text: str) -> list[ContractPrice]:
-    """Email that changes a price: find a SKU code + a $price near it."""
-    rows: list[ContractPrice] = []
-    sku_m = re.search(r"\b([A-Z]{3}-[A-Z0-9]+)\b", text)
-    price_m = re.search(r"\$([\d.]+)", text)
-    if sku_m and price_m:
-        rows.append(ContractPrice(
-            sku=sku_m.group(1),
-            description="Foley Catheter 16Fr 2-way (email price update)",
-            vendor="Cardinal", contracted_unit_price=float(price_m.group(1)),
-            source="Email addendum 4/12"))
-    return rows
-
 
 _corpus: list[ContractPrice] | None = None
 _corpus_lock = threading.Lock()
@@ -93,9 +47,11 @@ _corpus_lock = threading.Lock()
 def build_corpus(refresh: bool = False) -> list[ContractPrice]:
     """Ingest all messy sources into one unified price index. Cached after first call.
 
-    Note: later sources OVERRIDE earlier ones for the same SKU (the email
-    addendum's $3.60 beats the GPO's $4.20 for CTH-F16). That ordering is a
-    deliberate policy — newest price wins. Be ready to defend it.
+    Which files or feeds are read is config.CORPUS_SOURCE's business (see
+    src/ingest.py). Within one contract the newest amendment wins — the email
+    addendum's $3.60 replaces Cardinal's GPO $4.20 for CTH-F16 because it amends
+    that same contract. Across contracts nothing is overridden: two contracts
+    pricing one SKU are two rows, and recovery.select_contract_price() decides.
 
     The cache matters more than it looks. This used to be called once per order
     line from inside the retrieve node, so a scan of N orders re-read and
@@ -109,16 +65,8 @@ def build_corpus(refresh: bool = False) -> list[ContractPrice]:
     with _corpus_lock:
         if _corpus is not None and not refresh:
             return _corpus
-        corpus: dict[str, ContractPrice] = {}
-        ordered_sources = [
-            _parse_gpo_overlay((CONTRACTS / "gpo_overlay.txt").read_text()),
-            _parse_local_agreement((CONTRACTS / "local_agreement.txt").read_text()),
-            _parse_email_addendum((CONTRACTS / "email_addendum.txt").read_text()),
-        ]
-        for rows in ordered_sources:
-            for cp in rows:
-                corpus[cp.sku] = cp  # later wins
-        _corpus = list(corpus.values())
+        rows = [row for source in sources_for(CORPUS_SOURCE) for row in source.load()]
+        _corpus = merge_amendments(rows)
     return _corpus
 
 
