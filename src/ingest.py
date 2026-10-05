@@ -24,6 +24,8 @@ import re
 from pathlib import Path
 from typing import Iterable, Protocol
 
+from .config import MAX_VENDOR_CHARS
+from .guardrails import SKU_PATTERN, sanitize_contract_text
 from .schema import ContractPrice
 
 CONTRACTS = Path(__file__).resolve().parent.parent / "data" / "contracts"
@@ -131,6 +133,33 @@ def sources_for(name: str) -> list[ContractSource]:
         raise ValueError(
             f"Unknown corpus source {name!r}; expected one of {sorted(_REGISTRY)}"
         ) from None
+
+
+# --- Vet: contract text is untrusted --------------------------------------
+
+def vet(row: ContractPrice) -> ContractPrice:
+    """Clean a row's prompt-bound text and flag it if any of it reads as a payload.
+
+    Description, vendor and SKU all reach the prompt, so all three are checked.
+    The row is never dropped: a flagged contract may still be the true match, and
+    dropping it would lose that money silently. It is marked needs_verification,
+    which stops any order whose shortlist shows it from auto-claiming
+    (guardrails.shortlist_flags). The verbatim text is kept in source_text.
+    """
+    desc = sanitize_contract_text(row.description)
+    vendor = sanitize_contract_text(row.vendor, MAX_VENDOR_CHARS)
+    holder = sanitize_contract_text(row.holder, MAX_VENDOR_CHARS) if row.holder else None
+    sku_ok = bool(SKU_PATTERN.fullmatch(row.sku))
+
+    suspicious = (desc.suspicious or vendor.suspicious
+                  or (holder is not None and holder.suspicious) or not sku_ok)
+    return row.model_copy(update={
+        "description": desc.text,
+        "vendor": vendor.text,
+        "holder": holder.text if holder else None,
+        "source_text": row.source_text if row.source_text is not None else row.description,
+        "needs_verification": row.needs_verification or suspicious,
+    })
 
 
 # --- Merge ---------------------------------------------------------------

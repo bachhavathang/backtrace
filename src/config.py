@@ -248,6 +248,19 @@ CACHE_WARM_MIN_BATCH = 12
 # are untrusted input to the prompt. Cap the length an order line can contribute.
 MAX_ORDER_TEXT_CHARS = 400
 
+# Contract descriptions and vendor names are third-party text too once real
+# catalogs are ingested, and each one is repeated in every prompt whose shortlist
+# it joins — RETRIEVAL_K of them per call. The cap bounds both the attack surface
+# and the uncached half of the prompt. The verbatim text survives in source_text.
+MAX_CONTRACT_TEXT_CHARS = 300
+MAX_VENDOR_CHARS = 120
+
+# Share of contract lines the ingest-side injection check may flag before the
+# offline eval fails. Each flagged line escalates every order it is shown beside,
+# so this is a cost budget, and a sudden jump is the signature of a planted
+# payload (docs/WORKING_STATE.md §5.1, G10 and G23).
+CONTRACT_FLAG_ALERT_RATE = 0.001
+
 
 def pick_tier(top_similarity: float, runner_up_similarity: float) -> Tier:
     """Route an adjudication to the cheapest model that can safely make it.

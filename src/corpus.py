@@ -37,7 +37,7 @@ import re
 import threading
 
 from .config import CORPUS_SOURCE
-from .ingest import merge_amendments, sources_for
+from .ingest import merge_amendments, sources_for, vet
 from .schema import CandidateMatch, ContractPrice
 
 _corpus: list[ContractPrice] | None = None
@@ -65,7 +65,7 @@ def build_corpus(refresh: bool = False) -> list[ContractPrice]:
     with _corpus_lock:
         if _corpus is not None and not refresh:
             return _corpus
-        rows = [row for source in sources_for(CORPUS_SOURCE) for row in source.load()]
+        rows = [vet(row) for source in sources_for(CORPUS_SOURCE) for row in source.load()]
         _corpus = merge_amendments(rows)
     return _corpus
 

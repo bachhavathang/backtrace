@@ -220,6 +220,10 @@ def adjudicate(order_id: str, order_text: str, candidates: list,
     correct move is the same in every case.
     """
     clean = guardrails.sanitize_order_text(order_text)
+    # Flags owed to the shortlist ride with the input flags, so every exit below —
+    # success, refusal, transport failure — carries them, and decide() escalates
+    # on them without needing to know about contracts.
+    clean.flags += guardrails.shortlist_flags(candidates)
     system_blocks = _system_blocks()
     user = prompts.build_user_message(clean.text, candidates)
 

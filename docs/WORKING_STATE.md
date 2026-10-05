@@ -385,6 +385,27 @@ Carried forward from PR 1:
   human. Vendor entity resolution is PR 3 work.
 - Adjustment entries in the ledger are not built — waiting on the DB ledger (row 1).
 
+**PR 1 merged** as #1 (`fc0610b`).
+
+**PR 2 status (2026-10-05, branch `step1-pr2-contract-trust`):** G8–G10 and G22.
+`ingest.vet()` cleans every contract row's description, vendor and holder with the
+same sanitiser as order text, checks the SKU against `guardrails.SKU_PATTERN`, and
+sets `needs_verification` on a hit — never drops the row. The prompt fences contract
+lines in `<contract_lines>` and JSON-escapes each field; the system prompt now treats
+them as data (`reverse-map/v4`; Sonnet prefix 2,447 tok, still caches; Haiku 1,818,
+still doesn't). `guardrails.shortlist_flags()` adds `unverified_contract_shown` to the
+input flags inside `llm.adjudicate`, so it survives every exit and `decide()` stays
+pure. Offline eval reports the contract flag rate and fails above
+`CONTRACT_FLAG_ALERT_RATE` (0.1%). 146 tests pass; mutation-checked.
+
+Carried forward from PR 2:
+- **Clearance is not built.** A flagged contract escalates every order it is shown
+  beside, forever — safe, but noisy. Decision 2's one-time review, bound to a text
+  checksum and folded into `corpus_version`, lands when real data makes flags happen.
+- The 0.1% false-positive budget is untested against real catalog wording — PR 3.
+- The model is still called when a flagged line is in the shortlist; its pick goes to
+  the human as a suggestion. Skipping the call is an option if cost ever matters.
+
 ---
 
 ## 6. Housekeeping / loose ends
