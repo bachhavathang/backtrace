@@ -117,11 +117,30 @@ class SanitizedText:
 # could appear to speak from outside the block that marks it as data.
 _FENCE_TAG = re.compile(r"</?\s*(order_text|contract_lines)\s*>", re.IGNORECASE)
 
-# What a SKU may look like. It is printed into the prompt and echoed back by the
-# model, so a "SKU" carrying prompt syntax (| = " < >) is a payload, not a part
-# number. Single spaces between tokens are allowed: real VA catalog numbers look
-# like "SILQ 21400101003", and forbidding them flagged 3 of 22 real lines.
-SKU_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._/#()+-]| (?=[A-Za-z0-9])){0,63}")
+MAX_SKU_CHARS = 64
+_FIELD_SYNTAX = re.compile(r"\s\|\s|\b(sku|vendor|description)\s*=", re.IGNORECASE)
+
+
+def sku_is_clean(sku: str) -> bool:
+    """True when a SKU is safe to print into the prompt and echo back.
+
+    Not a character allowlist. Two allowlists in a row failed against real data:
+    one rejected spaces ("SILQ 21400101003", 3 of 22 lines), the next rejected
+    commas, asterisks and quotes ("MC*PB2411Y" — 174 of 24,883 lines, 0.7%, seven
+    times the false-positive budget). Real catalog numbers use that punctuation.
+    The prompt now prints the SKU as an escaped string literal, the way it prints
+    descriptions, so punctuation cannot break the line. What remains dangerous is
+    what sanitising would have to change — control characters, line breaks, our
+    fence tags, injection phrasing — plus excessive length.
+    """
+    if not sku or len(sku) > MAX_SKU_CHARS or sku != sku.strip():
+        return False
+    if _FIELD_SYNTAX.search(sku):
+        # Escaping stops it ending the field, but a part number has no reason to
+        # imitate the candidate line's own " | vendor=" layout.
+        return False
+    clean = _sanitize(sku, MAX_SKU_CHARS, None)
+    return not clean.suspicious and clean.text == sku
 
 
 def _sanitize(raw: str, max_chars: int, truncated_flag: str | None) -> SanitizedText:

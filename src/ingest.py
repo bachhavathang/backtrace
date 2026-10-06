@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Iterable, Protocol
 
 from .config import MAX_VENDOR_CHARS, RAW_DATA, SNAPSHOT
-from .guardrails import SKU_PATTERN, sanitize_contract_text
+from .guardrails import sanitize_contract_text, sku_is_clean
 from .schema import ContractPrice
 
 CONTRACTS = Path(__file__).resolve().parent.parent / "data" / "contracts"
@@ -168,7 +168,7 @@ def vet(row: ContractPrice) -> ContractPrice:
     desc = sanitize_contract_text(row.description)
     vendor = sanitize_contract_text(row.vendor, MAX_VENDOR_CHARS)
     holder = sanitize_contract_text(row.holder, MAX_VENDOR_CHARS) if row.holder else None
-    sku_ok = bool(SKU_PATTERN.fullmatch(row.sku))
+    sku_ok = sku_is_clean(row.sku)
 
     suspicious = (desc.suspicious or vendor.suspicious
                   or (holder is not None and holder.suspicious) or not sku_ok)

@@ -84,14 +84,22 @@ def _slug(term: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", term.lower()).strip("-")
 
 
-def harvest_va(fetch: Fetcher, out: Path, terms, max_pages: int, detail_budget: int) -> list[dict]:
+def harvest_va(fetch: Fetcher, out: Path, terms, max_pages: int, detail_budget: int,
+               resume: bool = False) -> list[dict]:
     rows: list[dict] = []
     for term in terms:
         for page in range(1, max_pages + 1):
             url = va_nac.list_url(term, page)
-            html = fetch.get(url)
             path = out / "va_nac" / "list" / f"{_slug(term)}_p{page}.html"
-            fetch.record(url, path, html)
+            if resume and path.exists():
+                html = path.read_bytes()       # fetched by the interrupted run
+                fetch.manifest.append({
+                    "url": url, "path": path.as_posix(),
+                    "sha256": hashlib.sha256(html).hexdigest(),
+                    "fetched_at": None, "note": "reused from an interrupted run"})
+            else:
+                html = fetch.get(url)
+                fetch.record(url, path, html)
             parsed = va_nac.parse_list_page(html.decode("utf-8", "replace"), page)
             rows.extend(parsed.rows)
             print(f"  VA  {term!r} p{page}: {len(parsed.rows)} rows (of {parsed.total})")
@@ -108,19 +116,35 @@ def harvest_va(fetch: Fetcher, out: Path, terms, max_pages: int, detail_budget: 
         seen_contracts.add(r["contract_number"])
     wanted = list(dict.fromkeys(first + rest))[:detail_budget]
 
-    details: dict[str, dict] = {}
+    details_path = out / "va_nac" / "details.json"
+    details: dict[str, dict] = (json.loads(details_path.read_text())
+                                if resume and details_path.exists() else {})
+    failed = 0
+
+    def save() -> None:
+        data = json.dumps(details, indent=1, sort_keys=True).encode()
+        fetch.record("(parsed from detail pages)", details_path, data)
+
     for i, log in enumerate(wanted, 1):
+        if log in details:
+            continue
         url = va_nac.detail_url(log)
-        html = fetch.get(url)
+        try:
+            html = fetch.get(url)
+        except (urllib.error.URLError, TimeoutError) as exc:
+            # One unreachable page costs that item its unit, not the whole harvest.
+            failed += 1
+            print(f"  VA  detail {log} failed: {exc}")
+            continue
         fields = va_nac.parse_detail_page(html.decode("utf-8", "replace"))
         details[log] = {k: (v.isoformat() if isinstance(v, date) else v) for k, v in fields.items()}
         fetch.manifest.append({"url": url, "path": None, "stored": "parsed fields only",
                                "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
         if i % 50 == 0:
+            save()     # an interruption loses at most 50 pages of work
             print(f"  VA  details {i}/{len(wanted)}")
-    data = json.dumps(details, indent=1, sort_keys=True).encode()
-    fetch.record("(parsed from detail pages)", out / "va_nac" / "details.json", data)
-    print(f"  VA  details: {len(details)} items")
+    save()
+    print(f"  VA  details: {len(details)} items, {failed} failed")
     return rows
 
 
@@ -168,17 +192,20 @@ def main(argv=None) -> int:
     ap.add_argument("--delay", type=float, default=1.0, help="seconds between requests")
     ap.add_argument("--out", type=Path, default=RAW / date.today().isoformat())
     ap.add_argument("--skip-fda", action="store_true")
+    ap.add_argument("--resume", action="store_true",
+                    help="finish an interrupted harvest: reuse saved pages and details")
     ap.add_argument("--fda-max-queries", type=int, default=900,
                     help="cap without OPENFDA_API_KEY; openFDA allows ~1,000 a day keyless")
     args = ap.parse_args(argv)
 
-    if args.out.exists() and any(args.out.iterdir()):
-        print(f"{args.out} already exists; snapshots are immutable. Pick another --out.")
+    if args.out.exists() and any(args.out.iterdir()) and not args.resume:
+        print(f"{args.out} already exists; snapshots are immutable. Pick another --out,"
+              " or --resume to finish an interrupted harvest into it.")
         return 1
     manifest: list[dict] = []
     fetch = Fetcher(args.delay, manifest)
     print(f"Harvesting into {args.out}")
-    rows = harvest_va(fetch, args.out, args.terms, args.max_pages, args.details)
+    rows = harvest_va(fetch, args.out, args.terms, args.max_pages, args.details, args.resume)
     if not args.skip_fda:
         harvest_fda(fetch, args.out, [r["catalog_number"] for r in rows], args.fda_max_queries)
     (args.out / "manifest.json").write_text(json.dumps({
