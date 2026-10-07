@@ -321,9 +321,26 @@ in the synthetic corpus (gloves, gauze, syringes, catheters, drapes).
 
 1. The model picks a **physical product** from a product-grouped shortlist (G6) —
    never a price, never a contract row.
-2. Python filters that product's contract rows to those where the **holder is the
-   product's manufacturer** (G5), the contract was **in force on the effective date**
-   (G13), and the hospital is **eligible** (assumed in the demo, labelled — G16).
+2. Python filters that product's contract rows to those where the **holder is bound
+   to the sale** (G5, revised 2026-10-07 — see below), the contract was **in force on
+   the effective date** (G13), and the hospital is **eligible** (assumed in the demo,
+   labelled — G16).
+
+   **Who must hold the contract — settled 2026-10-07 by the user ("Strict: A and B").**
+   A contract is a promise by its holder; money is owed back only by a party bound
+   by it. A claim counts when:
+   - **A — the seller holds it** (holder == order's billing supplier): the seller
+     broke its own promise. Added after the VA data showed most contracts are held
+     by sellers/resellers, not makers.
+   - **B — the maker holds it** (holder == order's manufacturer): the distributor that
+     delivered must honour the maker's price (GPO / chargeback model).
+   - **C — anyone else holds it**: **not a claim.** Reported as a *savings
+     opportunity* ("buy from the holder next time") — the forward/monitor mode.
+     Rejected alternative "holder OR registry manufacturer" would claim case C: a
+     false claim against a vendor that made no promise.
+   Holder names match exactly (case/space folded) until vendor entity resolution
+   exists, so a name variant can turn an A/B into a C — missed money, never a false
+   claim, and visible in the savings list rather than dropped.
 3. Within one contract, the newest amendment wins (today's "newest wins" policy is
    correct *only* inside one contract, never across contracts).
 4. If more than one valid price remains, **auto-claim at the highest** — the smallest,
@@ -451,10 +468,9 @@ Carried forward from PR 3a:
 - **Units are the binding constraint.** At 3% known, almost every claim will route
   to a human under Decision 1. Fix is a long detail harvest (~7 h at 1 req/s; run
   with `--resume --details 25000`, can span nights) or another unit source.
-- **FSS contracts are often held by resellers**, not manufacturers. Decision 1 filters
-  on holder == order manufacturer — built for GPO contracts. `ContractPrice.manufacturer`
-  (from FDA) now exists; whether the rule should accept holder OR manufacturer is a
-  decision for the user, not made here.
+- **FSS contracts are often held by resellers**, not manufacturers. Resolved
+  2026-10-07: Decision 1 now accepts holder == seller (A) or holder == maker (B);
+  other holders are savings opportunities (§5.2). Implementation lands in PR 3b.
 - FDA join rate 13% keyless; an `OPENFDA_API_KEY` lifts the 900-query cap.
 - VA "EA" sometimes prices a pack (e.g. one catheter at $1,171). This overstates the
   contract price, which shrinks a claim — the safe direction — but it is noise.
