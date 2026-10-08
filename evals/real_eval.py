@@ -42,7 +42,7 @@ from pathlib import Path
 from src import config, llm
 from src.agent import decide
 from src.config import RETRIEVAL_K, THRESHOLDS, Thresholds, pick_tier
-from src.corpus import product_key, retrieve_hybrid, warm_retrieval
+from src.corpus import product_key, retrieve_hybrid, variant_vocabulary, warm_retrieval
 from src.guardrails import Verdict
 from src.ingest import load_all, snapshot_dir
 from src.recovery import CLAIMABLE, SAVINGS_OPPORTUNITY, select_contract_price
@@ -50,6 +50,8 @@ from src.schema import MatchDecision, OrderLine
 
 DERIVED = config.DATA / "derived"
 POSITIVE = ("match_seller", "match_maker")
+CHOICE_FLAGS = ("order_number_absent_from_match", "rival_candidate_not_excluded",
+                "match_has_variant_word_order_lacks")
 HIGH_BARS = (0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.97, 0.99)
 LOW_BARS = (0.30, 0.50)
 BUCKETS = ((0.0, 0.5), (0.5, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 0.95), (0.95, 1.01))
@@ -74,7 +76,11 @@ def adjudicate_order(o: dict, corpus, exclude: frozenset, as_of: date) -> dict:
         return rec
 
     tier = pick_tier(cands[0].similarity, cands[1].similarity if len(cands) > 1 else 0.0)
-    verdict, call = llm.adjudicate(o["order_id"], order.raw_description, cands, tier)
+    # Live flags follow config.VARIANT_CHECK; --replay --checks [--variant-check]
+    # can score either setup against the same paid verdicts afterwards.
+    verdict, call = llm.adjudicate(o["order_id"], order.raw_description, cands, tier,
+                                   variant_vocabulary(corpus) if config.VARIANT_CHECK
+                                   else frozenset())
     chosen = cands[verdict.chosen_index - 1] if verdict.chosen_index else None
     rec.update({
         "chosen_index": verdict.chosen_index, "chosen_sku": verdict.chosen_sku,
@@ -194,7 +200,8 @@ def _pct(x) -> str:
     return "  n/a" if x is None else f"{x:6.1%}"
 
 
-def with_choice_checks(records: list[dict], dataset: dict, corpus) -> list[dict]:
+def with_choice_checks(records: list[dict], dataset: dict, corpus,
+                       variant_check: bool = False) -> list[dict]:
     """Re-apply guardrails.choice_flags to saved verdicts. No API calls.
 
     Retrieval is deterministic, so each order's shortlist is rebuilt exactly; a
@@ -204,6 +211,7 @@ def with_choice_checks(records: list[dict], dataset: dict, corpus) -> list[dict]
     from src.guardrails import choice_flags
     exclude = frozenset(tuple(k) for k in dataset["held_out_product_keys"])
     orders = {o["order_id"]: o for o in dataset["orders"]}
+    vocab = variant_vocabulary(corpus) if variant_check else frozenset()
     out, drift = [], 0
     for r in records:
         r = dict(r)
@@ -214,8 +222,10 @@ def with_choice_checks(records: list[dict], dataset: dict, corpus) -> list[dict]
             if idx > len(cands) or list(product_key(cands[idx - 1].contract)) != r["chosen_key"]:
                 drift += 1
             else:
-                r["flags"] = list(dict.fromkeys((r.get("flags") or []) +
-                                                choice_flags(text, cands, idx)))
+                # Choice flags are recomputed from scratch, so a replay can switch a
+                # check OFF as well as on; every other flag is kept as recorded.
+                kept = [f for f in (r.get("flags") or []) if f not in CHOICE_FLAGS]
+                r["flags"] = list(dict.fromkeys(kept + choice_flags(text, cands, idx, vocab)))
         out.append(r)
     if drift:
         print(f"WARNING: {drift} rebuilt shortlists disagree with the saved pick; left unchecked")
@@ -276,6 +286,8 @@ def main(argv=None) -> int:
     ap.add_argument("--replay", action="store_true", help="score saved verdicts only; no calls")
     ap.add_argument("--checks", action="store_true",
                     help="re-apply the deterministic choice checks to saved verdicts (no calls)")
+    ap.add_argument("--variant-check", action="store_true",
+                    help="with --checks: include the third (variant-word) check")
     args = ap.parse_args(argv)
 
     snap = args.snapshot or snapshot_dir()
@@ -305,9 +317,8 @@ def main(argv=None) -> int:
         corpus, _ = load_all([VaNacSource(snap)])
         dataset = json.loads((base / f"orders-seed{args.seed}.json").read_text())
         warm_retrieval()
-        records = with_choice_checks(records, dataset, corpus)
-        fired = sum(1 for r in records for f in (r.get("flags") or [])
-                    if f in ("order_number_absent_from_match", "rival_candidate_not_excluded"))
+        records = with_choice_checks(records, dataset, corpus, args.variant_check)
+        fired = sum(1 for r in records for f in (r.get("flags") or []) if f in CHOICE_FLAGS)
         print(f"Choice checks re-applied: {fired} flags raised across {len(records)} orders")
     return report(records)
 

@@ -138,7 +138,11 @@ def product_key(row: ContractPrice) -> tuple[str, str]:
 
 _groups_for: tuple[int, int] | None = None
 _groups: dict[tuple[str, str], list[ContractPrice]] = {}
-_groups_lock = threading.Lock()
+# Re-entrant, for the same reason as _embed_lock: the BM25 index and the variant
+# vocabulary are built under this lock and call product_groups(), which takes it.
+# A plain Lock deadlocked variant_vocabulary() whenever it ran before anything
+# else had grouped the corpus — the second time this module made that mistake.
+_groups_lock = threading.RLock()
 
 
 def product_groups(corpus: list[ContractPrice]) -> dict[tuple[str, str], list[ContractPrice]]:
@@ -388,3 +392,73 @@ def retrieve_hybrid(query: str, corpus: list[ContractPrice], k: int = 3,
     in_fused = set(ranked)
     ranked += [i for i in sem_ranked if i not in in_fused]
     return _top_products(ranked, sem_scores, corpus, k, exclude)
+
+
+# --- Variant vocabulary ---------------------------------------------------------
+#
+# The words that tell sibling products apart IN THIS CORPUS: "serrated", "curved",
+# "sterile", "lock"... Learned, not listed. For pairs of products from one holder
+# whose descriptions are near-identical, the words in one and not the other are
+# the attributes a variant turns on; a word that recurs across many such pairs is
+# a variant word. guardrails.unconfirmed_variant uses it to escalate a pick whose
+# product carries one the order never mentions — the case that beat the sibling
+# check, because the rival variant was absent from the catalog and so could not
+# be shortlisted to compare against.
+
+VARIANT_MIN_PAIRS = 3       # a word must separate siblings in at least this many places
+
+# Words that recur as add-ons but say nothing about WHICH physical product it is:
+# grammar and packaging. "with"/"for" carry no attribute by themselves, and pack
+# words describe how it ships — units are the price rule's job (G1), not this one's.
+VARIANT_IGNORE = frozenset({
+    "and", "for", "with", "the", "per", "each", "box", "boxed", "boxes", "case", "cases",
+    "pack", "pkg", "bag", "bags", "carton", "unit", "units", "set", "kit", "only", "new",
+})
+
+_variants_for: tuple[int, int] | None = None
+_variants: frozenset = frozenset()
+
+
+def _desc_words(text: str) -> frozenset:
+    return frozenset(w for w in re.findall(r"[a-z]+", text.lower()) if len(w) >= 3)
+
+
+def variant_vocabulary(corpus: list[ContractPrice]) -> frozenset:
+    """Optional qualifier words: a product exists both with and without them. Linear.
+
+    Each product is filed under (holder, its words minus one word) for every word
+    it has. Two products in one slot differ by exactly that one word on each side
+    ("...; Serrated; 10 in" vs "...; 10 in", "curved" vs "straight") — the shape a
+    variant has. A first, pairwise version timed out on 24,717 products.
+    """
+    global _variants_for, _variants
+    ident = (id(corpus), len(corpus))
+    if _variants_for == ident:
+        return _variants
+    with _groups_lock:
+        if _variants_for == ident:
+            return _variants
+        slots: dict[tuple, set] = {}
+        for rows in product_groups(corpus).values():
+            row = rows[0]
+            words = _desc_words(row.description)
+            holder = (row.holder or row.vendor).casefold()
+            slots.setdefault((holder, words), set()).add(None)        # the base itself
+            for w in words:
+                slots.setdefault((holder, words - {w}), set()).add(w)
+        # Count ADD-ONS only: a slot holding the base (None) plus products that each
+        # add one word is "the same product, with and without w". That is what an
+        # optional qualifier looks like — serrated, with stylet, with lock, AIR.
+        # Swaps (forceps "dressing" vs "tissue", "Crile-Wood" vs "Ryder") are
+        # different products, not variants; counting them flagged so many truncated
+        # orders that automatic claims halved on the real eval.
+        counts: dict[str, int] = {}
+        for extra in slots.values():
+            if None not in extra or len(extra) < 2:
+                continue
+            for w in extra - {None}:
+                counts[w] = counts.get(w, 0) + 1
+        _variants = frozenset(w for w, n in counts.items()
+                              if n >= VARIANT_MIN_PAIRS and w not in VARIANT_IGNORE)
+        _variants_for = ident
+    return _variants

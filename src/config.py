@@ -195,6 +195,16 @@ THRESHOLDS = Thresholds()
 # The confidence bars were swept at k=3 and must be re-swept at 10 (Step 3).
 RETRIEVAL_K = 10
 
+# The third choice check (guardrails.unconfirmed_variant): escalate a pick whose
+# product carries an optional qualifier ("serrated", "with stylet") the order never
+# mentions. Built and measured, OFF until a fresh paid run decides. On the 915
+# recorded verdicts it reaches zero false claims at a 0.80 bar but auto-claims
+# 25-34% of valid orders, against 32-41% for the two-check setup at 0.90.
+# Pre-registered rule (docs/WORKING_STATE.md): on the next fresh, locked run, ship
+# the setup with zero false claims and the higher auto-claim recall; if both are
+# zero, keep this off (simpler); if only this one is zero, turn it on.
+VARIANT_CHECK = os.environ.get("BACKTRACE_VARIANT_CHECK", "0") == "1"
+
 # Hybrid retrieval: reciprocal-rank fusion of BM25 (weight 1) and embeddings.
 # On real catalog text the embedding model alone found the right product in the
 # top 3 only 63% of the time; BM25, 85%. Part numbers, brands and sizes are exact

@@ -37,9 +37,9 @@ from __future__ import annotations
 import threading
 from typing import TypedDict
 
-from .config import RETRIEVAL_K, THRESHOLDS, Thresholds, pick_tier
+from .config import RETRIEVAL_K, THRESHOLDS, VARIANT_CHECK, Thresholds, pick_tier
 from .corpus import (build_corpus, corpus_version, identity_string, product_groups,
-                     product_key, retrieve_hybrid)
+                     product_key, retrieve_hybrid, variant_vocabulary)
 from .llm import adjudicate
 from .recovery import record_recovery
 from .schema import (CandidateMatch, ContractPrice, MatchDecision,
@@ -117,6 +117,7 @@ def node_reverse_map(state: State) -> State:
         order_text=order.raw_description,
         candidates=candidates,
         tier=tier,
+        variant_words=(variant_vocabulary(build_corpus()) if VARIANT_CHECK else frozenset()),
     )
 
     chosen = candidates[verdict.chosen_index - 1] if verdict.chosen_index else None
