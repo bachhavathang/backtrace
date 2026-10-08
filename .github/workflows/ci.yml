@@ -1,0 +1,36 @@
+name: ci
+
+# Every push and PR: the deterministic layers, plus the money-policy gate.
+# tests/test_policy_gate.py replays 915 recorded real-data verdicts and fails the
+# build if any change would turn one into a false claim against a vendor. No API
+# key is needed or used: the paid eval (evals/real_eval.py) is run by hand.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # CPU-only torch first: the default wheel pulls CUDA libraries the tests never use.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Unit tests and the false-claim gate
+        run: pytest -q
+
+      - name: Offline eval (guardrails + retrieval on the synthetic corpus)
+        run: python -m evals.run_eval --offline

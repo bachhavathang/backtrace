@@ -194,7 +194,13 @@ def make_order(n: int, kind: str, row: ContractPrice, rng: random.Random) -> dic
         maker = (row.manufacturer if row.manufacturer and not _maker_holds(row)
                  else rng.choice(OTHER_MAKERS))
     else:  # no_contract
-        supplier, maker = rng.choice(DISTRIBUTORS), row.manufacturer
+        # The REAL holder, not a fictional distributor. The dangerous real case is
+        # buying an off-contract variant from the very vendor that holds contracts
+        # on its siblings ("with stylet" when only "without" is contracted): the
+        # holder rule passes, so only the match decision stands between that order
+        # and a false claim. A fictional seller let the holder rule hide it — the
+        # Step 3 pilot found the model matching such siblings at 0.85-0.90.
+        supplier, maker = holder, row.manufacturer
     markup = rng.uniform(1.10, 1.80)
     return {
         "order_id": f"RO-{n:05d}",
@@ -239,6 +245,11 @@ def generate(corpus: list[ContractPrice], n: int, seed: int, plan: Plan = Plan()
         row = next(r for r in groups[k] if _maker_holds(r))
         orders.append(make_order(len(orders), "match_maker", row, rng))
 
+    # Interleave kinds, so a budget-capped partial run is a fair sample and not
+    # "the no-contract cases first" (which is what the first Step 3 pilot got).
+    rng.shuffle(orders)
+    for i, o in enumerate(orders):
+        o["order_id"] = f"RO-{i:05d}"
     return {"seed": seed, "n_requested": n, "held_out_product_keys": [list(k) for k in held_out],
             "orders": orders}
 
