@@ -569,6 +569,65 @@ were set at k=3); decide whether `no_match_bar` should be removed or re-founded 
 signal that separates (e.g. the model's own NO_MATCH); measure escalation rate on the
 real orders. All need an API key.
 
+**Step 2 merged** as #6.
+
+### Step 3 — the full pipeline on real data (2026-10-08, branch `step3-calibration`)
+
+`python -m evals.real_eval` adjudicates the realistic orders (API), appends each verdict
+to `data/derived/<snapshot>/verdicts-seed<N>.jsonl`, skips work already on file, and
+stops at a hard `--budget`. `--replay` re-scores saved verdicts free (decide() is pure);
+`--checks` re-applies the deterministic choice checks to saved verdicts.
+
+**Spend:** $2.82 (600 orders, seed 7) + $1.47 (315 fresh test orders, seed 11) + $0.21
+(synthetic eval) = **$4.50**, under the $5 cap. $0.0047 per order.
+
+**What the model gets wrong on real data — one pattern.** Every false claim was a
+*sibling*: the order omits the one attribute two catalog variants differ on
+("serrated", "with stylet", "AIR", "extended insulation"), and the model picks one at
+0.85–0.92, sometimes asserting the attribute ("without stylet matches exactly") when
+the order never said it. The prompt's "silence is not agreement" rule did not hold.
+
+**Two deterministic checks** (`guardrails.choice_flags`, escalating flags, run inside
+`llm.adjudicate`, so `decide()` stays pure):
+- *number check* — every number in the order must be in the chosen product
+  ("5 pairs" cannot be the "3 PAIRS" line);
+- *sibling check* — a near-identical rival (description Jaccard ≥ 0.5) the order gives
+  no reason to reject, or a reason to prefer, escalates. First version scored
+  similarity with SKU tokens and missed a textbook pair (0.44); now description-only.
+
+**Results** (false claims / auto-claim recall / escalation):
+
+| Bar | Checks | seed-7 tune | seed-7 test | seed-11 test (fresh, locked) |
+|---|---|---|---|---|
+| 0.85 (old) | no | — | **3** / 41% / 39% | — |
+| 0.95 | no | 0 / 25% / 52% | 0 / 20% / 59% | — |
+| 0.80 | yes | 0 / 42% / 38% | 0 / 35% / 45% | **1** / 43% / 35% |
+| **0.90 (shipped)** | yes | 0 / 38% / 40% | 0 / 32% / 47% | **0** / 41% / 37% |
+
+**Honest status of 0.90: provisional.** Process: bars chosen on tune → 0.80; locked
+confirmation on fresh seed-11 orders → **1 false claim** (failed: a plain Wullstein
+forceps absent from the catalog, its serrated sibling claimed at 0.85 — no rival in the
+shortlist, so the sibling check had nothing to compare). 0.90 is clean on all three sets
+but was chosen *after* seeing seed-11, so it needs one more fresh run to count. Also
+disclosed: the two checks were designed after looking at false claims that included
+seed-7 *test* orders.
+
+**Calibration** (fresh seed-11): confidence 0.90–1.00 → 100% right (124/124); 0.80–0.90
+→ 83%; 0.70–0.80 → 89%. Below 0.9 the model's stated confidence is not reliable enough
+to auto-claim on — which is what 0.90 encodes.
+
+**CI gate landed:** `.github/workflows/ci.yml` runs pytest + the offline eval on every
+push/PR. `tests/test_policy_gate.py` replays 915 recorded verdicts
+(`evals/fixtures/`) and fails the build on any false claim at the shipped bars — plus a
+test that it *does* fire at 0.80.
+
+**Not changed:** `no_match_bar` (never fires on real data; harmless; replacing it is a
+design question for later). Synthetic eval at k=10/hybrid: 0 false claims at every bar.
+
+**Next:** a third check for the case that beat this one — the chosen product carries a
+variant word ("serrated") the order never mentions and no rival is shown — derived from
+the corpus's own sibling differences, then **one more fresh, locked run (~$1.50)**.
+
 Carried forward from PR 3b:
 - `select_contract_price` is still not wired into the scan: it needs order lines that
   name a seller and a maker, which PR 4's degraded real orders will carry.

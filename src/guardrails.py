@@ -319,3 +319,96 @@ def error_verdict(message: str, input_flags: list[str] | None = None) -> Verdict
     if FLAG_LLM_ERROR not in flags:
         flags.append(FLAG_LLM_ERROR)
     return Verdict(0, None, 0.0, False, message, flags)
+
+
+# --- 5. Choice checks: deterministic second opinions on a confident pick ------
+#
+# Found by running the model on 600 realistic orders against 24,883 real contract
+# lines (evals/real_eval.py). Every false claim at the old bar was a SIBLING
+# mix-up: the order left out the one attribute on which two catalog variants
+# differ, and the model picked one anyway at 0.85-0.92 —
+#     "dressing symmetry 10 in"           -> the plain forceps, not the serrated
+#     "suture boots ... 5 pairs ..."      -> the 3-pair variant
+# The prompt already says "silence is not agreement"; the model still did it.
+# These checks do not judge meaning. They test two facts about the text that a
+# claim against a vendor must survive, and either one escalates.
+
+FLAG_NUMBER_CONFLICT = "order_number_absent_from_match"
+FLAG_SIBLING = "rival_candidate_not_excluded"
+ESCALATING_FLAGS = ESCALATING_FLAGS | {FLAG_NUMBER_CONFLICT, FLAG_SIBLING}
+
+# Two candidates closer than this (word-set Jaccard) are treated as variants of
+# one product line, whose differences the order must address.
+SIBLING_SIMILARITY = 0.5
+_STOPWORDS = frozenset({"the", "and", "with", "for", "of", "per", "in", "x", "w", "a", "to"})
+
+
+def _numbers(text: str) -> set[str]:
+    """Numbers as written, minus trailing zero decimals ("10.0" == "10")."""
+    out = set()
+    for n in re.findall(r"\d+(?:\.\d+)?", text or ""):
+        out.add(n.rstrip("0").rstrip(".") if "." in n else n.lstrip("0") or "0")
+    return out
+
+
+def _content_words(text: str) -> set[str]:
+    words = re.findall(r"[a-z0-9]+", unicodedata.normalize("NFKC", text or "").lower())
+    return {w for w in words if w not in _STOPWORDS}
+
+
+def _candidate_text(candidate) -> str:
+    return f"{candidate.contract.description} {candidate.contract.sku}"
+
+
+def number_conflict(order_text: str, chosen) -> bool:
+    """A number the order states that the chosen product does not carry.
+
+    Sizes, gauges, lengths and pack counts are how variants differ, and a number
+    written in an order is deliberate. "5 pairs" cannot be the "3 PAIRS" line.
+    Errs towards escalating: "1.00" vs "1" in different notations also fires.
+    """
+    return not _numbers(order_text) <= _numbers(_candidate_text(chosen))
+
+
+def sibling_not_excluded(order_text: str, chosen, others: list) -> bool:
+    """A near-identical rival the order gives no reason to reject.
+
+    For each rival close enough to be a variant of the chosen product, look at
+    the words that tell them apart. If the order mentions none of them, it cannot
+    distinguish the two; if it mentions only the RIVAL's, it points the other way.
+    Either way the pick is not supported by the order text.
+    """
+    order = _content_words(order_text)
+    mine = _content_words(_candidate_text(chosen))
+    mine_desc = _content_words(chosen.contract.description)
+    for rival in others:
+        theirs = _content_words(_candidate_text(rival))
+        # Similarity on DESCRIPTIONS only. With part numbers included, "Symmetry
+        # Forceps; Dressing; 10 in" and its "...; Serrated; 10 in" twin scored 0.44
+        # — the SKU tokens alone pushed a textbook sibling under the bar, and the
+        # one false claim that survived this check on the real eval was exactly it.
+        # Part numbers still count as EVIDENCE below: an order citing one decides it.
+        theirs_desc = _content_words(rival.contract.description)
+        union = mine_desc | theirs_desc
+        if not union or len(mine_desc & theirs_desc) / len(union) < SIBLING_SIMILARITY:
+            continue
+        if number_conflict(order_text, rival):
+            continue        # the order's own numbers already rule this rival out
+        for_mine, for_theirs = order & (mine - theirs), order & (theirs - mine)
+        if not for_mine or len(for_theirs) > len(for_mine):
+            return True
+    return False
+
+
+def choice_flags(order_text: str, candidates: list, chosen_index: int) -> list[str]:
+    """Flags owed to the model's pick. Empty for an abstention."""
+    if not chosen_index or chosen_index > len(candidates):
+        return []
+    chosen = candidates[chosen_index - 1]
+    others = [c for i, c in enumerate(candidates, 1) if i != chosen_index]
+    flags = []
+    if number_conflict(order_text, chosen):
+        flags.append(FLAG_NUMBER_CONFLICT)
+    if sibling_not_excluded(order_text, chosen, others):
+        flags.append(FLAG_SIBLING)
+    return flags

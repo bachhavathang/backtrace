@@ -169,7 +169,13 @@ class Thresholds:
     """
     no_match_bar: float = 0.15
     low_bar: float = 0.50
-    high_bar: float = 0.85
+    # 0.90 (provisional). On 600 realistic orders over 24,883 real contract lines, the
+    # TUNE split reached zero false claims at 0.80 once the deterministic choice
+    # checks (guardrails.choice_flags) run; a fresh, locked confirmation set then
+    # found one false claim at 0.85. 0.90 is clean on all three sets (915 orders),
+    # but was chosen after seeing that set, so it needs one more fresh run. Without
+    # the checks, zero needed 0.95 and escalated ~59%. Was 0.85, set on 7 synthetic lines.
+    high_bar: float = 0.90
 
     # Tier routing. A "clear winner" is a high-scoring top candidate that also
     # beats the runner-up by a comfortable margin. Anything closer than this is

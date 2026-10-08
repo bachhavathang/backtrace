@@ -15,16 +15,19 @@ from src import config, guardrails, llm, prompts
 from src.schema import CandidateMatch, ContractPrice
 
 
-def _candidate(sku="GLV-N100"):
+def _candidate(sku="GLV-N100", description="Nitrile gloves large"):
     return CandidateMatch(
-        contract=ContractPrice(sku=sku, description="Nitrile gloves large",
+        contract=ContractPrice(sku=sku, description=description,
                                contracted_unit_price=9.10, vendor="Medline",
                                source="GPO overlay 2025"),
         similarity=0.8,
     )
 
 
-CANDIDATES = [_candidate("GLV-N100"), _candidate("ACM-GLV-L")]
+# Distinct descriptions: two identical ones are, correctly, an escalation now
+# (guardrails.choice_flags) — see test_identical_twin_candidates_escalate.
+CANDIDATES = [_candidate("GLV-N100", "Nitrile gloves large powder-free"),
+              _candidate("ACM-GLV-L", "Vinyl gloves large")]
 
 
 @pytest.fixture(autouse=True)
@@ -138,6 +141,16 @@ def test_successful_adjudication_returns_a_validated_verdict(monkeypatch):
     assert not verdict.must_escalate
     assert record.ok and record.request_id == "req_test123"
     assert record.cost_usd > 0
+
+
+def test_identical_twin_candidates_escalate(monkeypatch):
+    # Two contract lines the order text cannot tell apart: a confident pick of
+    # either is a coin toss, and must not become an automatic claim.
+    _install(monkeypatch, _fake_response())
+    twins = [_candidate("GLV-N100"), _candidate("ACM-GLV-L")]
+    verdict, _ = llm.adjudicate("PO-1", "nitrile gloves lg", twins, config.PRECISE)
+    assert verdict.chosen_sku == "GLV-N100"
+    assert guardrails.FLAG_SIBLING in verdict.flags and verdict.must_escalate
 
 
 def test_usage_is_accumulated_for_the_scan_report(monkeypatch):

@@ -296,6 +296,11 @@ def adjudicate(order_id: str, order_text: str, candidates: list,
         return verdict, record
 
     verdict = guardrails.validate_verdict(raw, candidates, clean.flags)
+    # Deterministic second opinions on the pick: a number the order states that the
+    # match lacks, or a near-identical rival the order gives no reason to reject.
+    for flag in guardrails.choice_flags(clean.text, candidates, verdict.chosen_index):
+        if flag not in verdict.flags:
+            verdict.flags.append(flag)
     record.ok = True
     record.flags = verdict.flags
     _finish(record, system_blocks, user, text)
