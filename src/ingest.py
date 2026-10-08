@@ -105,7 +105,22 @@ class FileSource:
         self._parser = parser
 
     def load(self) -> list[ContractPrice]:
-        return self._parser(self.path.read_text())
+        return self._parser(read_document(self.path))
+
+
+def read_document(path: Path) -> str:
+    """Decode a contract document: UTF-8 if it is, else Windows-1252.
+
+    The hand-written files carry a Windows-1252 em dash (byte 0x97). read_text()
+    with no encoding uses the platform default, so they parsed on Windows and
+    crashed on Linux; CI's first run on ubuntu caught it. Real documents arrive
+    in both encodings, so the fallback is deliberate, not a patch for one file.
+    """
+    raw = path.read_bytes()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252")
 
 
 def synthetic_sources() -> list[ContractSource]:
