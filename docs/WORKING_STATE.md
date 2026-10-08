@@ -504,6 +504,34 @@ conservative key correctly keeps apart. The hard retrieval problem in real data 
 near-duplicates — same product family, different size or pack — which is exactly
 what Step 2's recall@k measurement is for.
 
+**PRs #2, #3, #4 merged 2026-10-08** (top-down; `main` at `cb7ba13`, 206 tests pass).
+
+**PR 4 status (2026-10-08, branch `step1-pr4-real-orders`):** `python -m evals.real_orders`
+turns a real snapshot into labelled, degraded order lines (§3C option 1). Written to
+`data/derived/<snapshot>/orders-seed<N>.json` (gitignored; reproducible from snapshot +
+seed). Each order has a hidden `label`: kind (match_seller A / match_maker B / savings C
+/ no_contract), the product key as an equivalence set, split, operators, and
+`list_price_synthetic: true`.
+
+- Operators: lowercase, abbreviate (inverse glossary), drop_words (never numbers),
+  shuffle, truncate; **held out for the test split only:** typo, rephrase_pack.
+- Split **by product** — no product in both halves.
+- no_contract products are listed in `held_out_product_keys`; Step 2's eval must
+  search the corpus *minus* those.
+- Supplier/maker names on B and C cases are fictional distributors/makers.
+
+600 orders, seed 7: 330 A, 60 B, 120 C, 90 no-contract; 265 tune / 335 test.
+**Claim-rule audit: 0 false claims** (seeds 7, 11, 23) — every A/B claimable, every C a
+savings opportunity, every no-contract unpriceable.
+
+The audit's first run found **1 "false claim"** — and the rule was right: a reseller's
+row was labelled C while the product's *maker* held its own contract (a genuine B).
+The generator now builds C cases only from products with no maker-held row. Pinned
+by a regression test, plus a test that the audit fires on a mislabelled case.
+
+Known limit: `truncate` can strip every identifying word ("the blcak knight is",
+from a brand-led description). Realistic for vague orders; Step 2 will count them.
+
 Carried forward from PR 3b:
 - `select_contract_price` is still not wired into the scan: it needs order lines that
   name a seller and a maker, which PR 4's degraded real orders will carry.
