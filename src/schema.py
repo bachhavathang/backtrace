@@ -40,6 +40,10 @@ class ContractPrice(BaseModel):
     contract_id: Optional[str] = None
     holder: Optional[str] = None     # who the price binds: the manufacturer, not
                                      # necessarily who invoiced (a distributor)
+    manufacturer: Optional[str] = None   # who made it, per the device registry (GUDID);
+                                         # differs from holder when a reseller holds the contract
+    product_group: Optional[str] = None  # device nomenclature term (GMDN); identical
+                                         # products from different sellers share it
 
     # --- When the price applies -----------------------------------------
     effective_start: Optional[date] = None   # None = open-ended
@@ -131,7 +135,8 @@ class ReverseMapResult(BaseModel):
     tier: Optional[str] = None
     prompt_version: Optional[str] = None
     corpus_version: Optional[str] = None
-    candidates_considered: list[str] = Field(default_factory=list)
+    candidates_considered: list[str] = Field(default_factory=list)   # SKUs, for reading
+    candidate_keys: list[str] = Field(default_factory=list)          # full identity, for lookup
     guardrail_flags: list[str] = Field(default_factory=list)
     latency_ms: Optional[float] = None
     cost_usd: Optional[float] = None
@@ -163,6 +168,18 @@ class ReverseMapResult(BaseModel):
 
 
 class CandidateMatch(BaseModel):
-    """A retrieval candidate: a contract price + how similar it looked. Feeds the agent."""
+    """A retrieval candidate: one physical product + how similar it looked.
+
+    `contract` is the best-scoring row for the product and is what the model reads.
+    `group` is every contract row pricing that same product — several contract
+    vehicles, several resellers. The model decides WHICH product; choosing among
+    the group's prices is recovery.select_contract_price(), in Python.
+    """
     contract: ContractPrice
     similarity: float  # retrieval score, 0..1 — NOT the final confidence
+    group: list[ContractPrice] = Field(default_factory=list)
+
+    @property
+    def rows(self) -> list[ContractPrice]:
+        """Every contract row for this product (just `contract` when ungrouped)."""
+        return self.group or [self.contract]

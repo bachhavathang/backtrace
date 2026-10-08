@@ -117,9 +117,30 @@ class SanitizedText:
 # could appear to speak from outside the block that marks it as data.
 _FENCE_TAG = re.compile(r"</?\s*(order_text|contract_lines)\s*>", re.IGNORECASE)
 
-# What a SKU may look like. It is printed into the prompt and echoed back by the
-# model, so a "SKU" carrying spaces or punctuation is a payload, not a part number.
-SKU_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/#-]{0,63}")
+MAX_SKU_CHARS = 64
+_FIELD_SYNTAX = re.compile(r"\s\|\s|\b(sku|vendor|description)\s*=", re.IGNORECASE)
+
+
+def sku_is_clean(sku: str) -> bool:
+    """True when a SKU is safe to print into the prompt and echo back.
+
+    Not a character allowlist. Two allowlists in a row failed against real data:
+    one rejected spaces ("SILQ 21400101003", 3 of 22 lines), the next rejected
+    commas, asterisks and quotes ("MC*PB2411Y" — 174 of 24,883 lines, 0.7%, seven
+    times the false-positive budget). Real catalog numbers use that punctuation.
+    The prompt now prints the SKU as an escaped string literal, the way it prints
+    descriptions, so punctuation cannot break the line. What remains dangerous is
+    what sanitising would have to change — control characters, line breaks, our
+    fence tags, injection phrasing — plus excessive length.
+    """
+    if not sku or len(sku) > MAX_SKU_CHARS or sku != sku.strip():
+        return False
+    if _FIELD_SYNTAX.search(sku):
+        # Escaping stops it ending the field, but a part number has no reason to
+        # imitate the candidate line's own " | vendor=" layout.
+        return False
+    clean = _sanitize(sku, MAX_SKU_CHARS, None)
+    return not clean.suspicious and clean.text == sku
 
 
 def _sanitize(raw: str, max_chars: int, truncated_flag: str | None) -> SanitizedText:
@@ -198,7 +219,9 @@ def shortlist_flags(candidates: list) -> list[str]:
     never reached the prompt — below the retrieval floor — owes nothing, so this
     is only called for shortlists that are actually sent.
     """
-    if any(getattr(c.contract, "needs_verification", False) for c in candidates):
+    # Every row of a grouped product counts: their vendor names reach the prompt too.
+    rows = [r for c in candidates for r in (getattr(c, "rows", None) or [c.contract])]
+    if any(getattr(r, "needs_verification", False) for r in rows):
         return [FLAG_UNVERIFIED_CONTRACT]
     return []
 

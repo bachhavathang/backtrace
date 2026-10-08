@@ -66,6 +66,7 @@ def record_recovery(result: ReverseMapResult) -> dict:
             "prompt_version": result.prompt_version,
             "corpus_version": result.corpus_version,
             "candidates_considered": result.candidates_considered,
+            "candidate_keys": result.candidate_keys,
             "guardrail_flags": result.guardrail_flags,
             "rationale": result.rationale,
         }
@@ -89,6 +90,7 @@ CLAIMABLE = "claimable"
 NEEDS_REVIEW = "needs_review"
 EXPIRED = "expired"
 NO_VALID_CONTRACT = "no_valid_contract"
+SAVINGS_OPPORTUNITY = "savings_opportunity"   # a cheaper contract exists, but binds someone else
 
 
 @dataclass
@@ -121,8 +123,14 @@ def select_contract_price(order: OrderLine, rows: list[ContractPrice],
                           as_of: date) -> PriceSelection:
     """Pick the contract price for an order from every row pricing the matched product.
 
-    1. Keep rows whose holder is the order's MANUFACTURER — the contract binds the
-       maker, even when a distributor invoiced.
+    1. Keep rows whose holder is bound to this sale (settled 2026-10-07):
+         A  the holder SOLD it (holder == order.supplier) — it broke its own promise;
+         B  the holder MADE it (holder == order.manufacturer) — the distributor that
+            delivered must honour the maker's price.
+       Any other holder made no promise to this seller: SAVINGS_OPPORTUNITY, never a
+       claim — "buy from that holder next time". The registry manufacturer on a
+       reseller's row does not count; that would claim against a party that made
+       no promise.
     2. Keep rows in force on the order's effective date.
     3. If several remain, the automatic claim uses the HIGHEST: the smallest claim,
        the one a vendor cannot dispute. The gap to the lowest is reported, not
@@ -130,23 +138,29 @@ def select_contract_price(order: OrderLine, rows: list[ContractPrice],
     4. If the claim window has closed by `as_of`, the money is EXPIRED, not
        recoverable.
 
-    Anything this cannot establish — an unknown manufacturer, a manufacturer with
-    no contract under that exact name, an unknown date against a dated contract,
-    prices in units that cannot be compared — returns
-    NEEDS_REVIEW. Unknown never becomes a claim and never becomes "no contract".
+    Anything this cannot establish — an order naming neither seller nor maker, an
+    unknown date against a dated contract, prices in units that cannot be compared
+    — returns NEEDS_REVIEW. Unknown never becomes a claim and never becomes
+    "no contract".
     """
-    if not order.manufacturer:
-        return PriceSelection(NEEDS_REVIEW, reason="order has no manufacturer")
+    if not order.manufacturer and not order.supplier:
+        return PriceSelection(NEEDS_REVIEW, reason="order names neither seller nor maker")
 
-    held = [r for r in rows if _same_party(r.holder or r.vendor, order.manufacturer)]
+    def bound(r: ContractPrice) -> bool:
+        holder = r.holder or r.vendor
+        return _same_party(holder, order.supplier) or _same_party(holder, order.manufacturer)
+
+    held = [r for r in rows if bound(r)]
     if not held:
-        # Not NO_VALID_CONTRACT: with exact name matching, "Medline Industries" vs
-        # "Medline" lands here too, and calling that "no contract" drops the money
-        # silently. A human tells a name mismatch from a genuine other-maker price.
+        # Names match exactly until vendor entity resolution exists, so a variant
+        # ("Medline Industries" vs "Medline") lands here too. That costs a missed
+        # claim, never a false one, and it stays visible on the savings list.
         others = sorted({r.holder or r.vendor for r in rows})
-        return PriceSelection(NEEDS_REVIEW, valid=[],
-                              reason=f"no contract held by {order.manufacturer!r}; "
-                                     f"held by {others}")
+        cheapest = min(rows, key=lambda r: (r.per_each_price is None,
+                                            r.per_each_price or r.contracted_unit_price))
+        return PriceSelection(SAVINGS_OPPORTUNITY, lowest=cheapest, valid=[],
+                              reason=f"no contract held by the seller {order.supplier!r} "
+                                     f"or maker {order.manufacturer!r}; held by {others}")
 
     if order.effective_date is None:
         if any(r.effective_start or r.effective_end for r in held):

@@ -38,7 +38,8 @@ import threading
 from typing import TypedDict
 
 from .config import RETRIEVAL_K, THRESHOLDS, Thresholds, pick_tier
-from .corpus import build_corpus, corpus_version, retrieve_semantic
+from .corpus import (build_corpus, corpus_version, identity_string, product_groups,
+                     product_key, retrieve_semantic)
 from .llm import adjudicate
 from .recovery import record_recovery
 from .schema import (CandidateMatch, ContractPrice, MatchDecision,
@@ -102,6 +103,7 @@ def node_reverse_map(state: State) -> State:
             ),
             corpus_version=corpus_version(),
             candidates_considered=[c.contract.sku for c in candidates],
+            candidate_keys=[identity_string(c.contract) for c in candidates],
         )
         return state
 
@@ -135,6 +137,7 @@ def node_reverse_map(state: State) -> State:
         prompt_version=call.prompt_version,
         corpus_version=corpus_version(),
         candidates_considered=[c.contract.sku for c in candidates],
+            candidate_keys=[identity_string(c.contract) for c in candidates],
         guardrail_flags=verdict.flags,
         latency_ms=round(call.latency_ms, 1),
         cost_usd=round(call.cost_usd, 6),
@@ -250,11 +253,21 @@ def candidates_for(result: ReverseMapResult) -> list[CandidateMatch]:
     Lets the deferred review phase in main.py show the same candidates the agent
     saw, without carrying graph state around between the scan and the review.
     """
-    by_sku = {c.sku: c for c in build_corpus()}
-    return [
-        CandidateMatch(contract=by_sku[sku], similarity=0.0)
-        for sku in result.candidates_considered if sku in by_sku
-    ]
+    corpus = build_corpus()
+    groups = product_groups(corpus)
+
+    def match(row: ContractPrice) -> CandidateMatch:
+        group = groups.get(product_key(row), [])
+        return CandidateMatch(contract=row, similarity=0.0,
+                              group=group if len(group) > 1 else [])
+
+    if result.candidate_keys:
+        # By identity: once one SKU sits on several contracts, a SKU names no row.
+        by_key = {identity_string(c): c for c in corpus}
+        return [match(by_key[k]) for k in result.candidate_keys if k in by_key]
+    # Results recorded before candidate_keys existed carry SKUs only.
+    by_sku = {c.sku: c for c in corpus}
+    return [match(by_sku[s]) for s in result.candidates_considered if s in by_sku]
 
 
 def _fill_prices(result: ReverseMapResult, order: OrderLine,

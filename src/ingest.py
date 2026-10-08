@@ -21,11 +21,12 @@ replaces a row.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Protocol
 
-from .config import MAX_VENDOR_CHARS
-from .guardrails import SKU_PATTERN, sanitize_contract_text
+from .config import MAX_VENDOR_CHARS, RAW_DATA, SNAPSHOT
+from .guardrails import sanitize_contract_text, sku_is_clean
 from .schema import ContractPrice
 
 CONTRACTS = Path(__file__).resolve().parent.parent / "data" / "contracts"
@@ -116,8 +117,26 @@ def synthetic_sources() -> list[ContractSource]:
     ]
 
 
+def snapshot_dir() -> Path:
+    """The snapshot to read: BACKTRACE_SNAPSHOT if set, else the newest in data/raw."""
+    if SNAPSHOT:
+        return Path(SNAPSHOT)
+    dated = sorted(p for p in RAW_DATA.glob("*") if p.is_dir()) if RAW_DATA.exists() else []
+    if not dated:
+        raise FileNotFoundError(
+            f"No snapshot under {RAW_DATA}. Run: python -m src.sources.harvest")
+    return dated[-1]
+
+
+def real_sources() -> list[ContractSource]:
+    """VA contract prices, enriched from the FDA device registry, from one snapshot."""
+    from .sources.va_nac import VaNacSource   # deferred: synthetic runs never need it
+    return [VaNacSource(snapshot_dir())]
+
+
 _REGISTRY = {
     "synthetic": synthetic_sources,
+    "real": real_sources,
 }
 
 
@@ -149,7 +168,7 @@ def vet(row: ContractPrice) -> ContractPrice:
     desc = sanitize_contract_text(row.description)
     vendor = sanitize_contract_text(row.vendor, MAX_VENDOR_CHARS)
     holder = sanitize_contract_text(row.holder, MAX_VENDOR_CHARS) if row.holder else None
-    sku_ok = bool(SKU_PATTERN.fullmatch(row.sku))
+    sku_ok = sku_is_clean(row.sku)
 
     suspicious = (desc.suspicious or vendor.suspicious
                   or (holder is not None and holder.suspicious) or not sku_ok)
@@ -160,6 +179,46 @@ def vet(row: ContractPrice) -> ContractPrice:
         "source_text": row.source_text if row.source_text is not None else row.description,
         "needs_verification": row.needs_verification or suspicious,
     })
+
+
+# --- Load, with a report -------------------------------------------------
+
+@dataclass
+class IngestReport:
+    """What happened to every row, so nothing disappears without a count (G17).
+
+    `sources` holds each source's own account (rows read, kept, rejected by
+    reason, registry join) where the source keeps one; hand-written sources
+    report only what they returned.
+    """
+    sources: dict[str, dict] = field(default_factory=dict)
+    loaded: int = 0
+    flagged: int = 0
+    merged_away: int = 0
+    total: int = 0
+
+    def summary(self) -> str:
+        lines = [f"{name}: {info}" for name, info in self.sources.items()]
+        lines.append(f"loaded {self.loaded}, flagged {self.flagged}, "
+                     f"merged away {self.merged_away} (amendments/duplicates), "
+                     f"corpus {self.total}")
+        return "\n".join(lines)
+
+
+def load_all(sources: list[ContractSource]) -> tuple[list[ContractPrice], IngestReport]:
+    report = IngestReport()
+    rows: list[ContractPrice] = []
+    for source in sources:
+        loaded = [vet(row) for row in source.load()]
+        info = source.report() if hasattr(source, "report") else {"kept": len(loaded)}
+        report.sources[source.name] = info
+        rows.extend(loaded)
+    merged = merge_amendments(rows)
+    report.loaded = len(rows)
+    report.flagged = sum(r.needs_verification for r in merged)
+    report.merged_away = len(rows) - len(merged)
+    report.total = len(merged)
+    return merged, report
 
 
 # --- Merge ---------------------------------------------------------------

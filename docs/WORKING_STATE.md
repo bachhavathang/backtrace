@@ -321,9 +321,26 @@ in the synthetic corpus (gloves, gauze, syringes, catheters, drapes).
 
 1. The model picks a **physical product** from a product-grouped shortlist (G6) —
    never a price, never a contract row.
-2. Python filters that product's contract rows to those where the **holder is the
-   product's manufacturer** (G5), the contract was **in force on the effective date**
-   (G13), and the hospital is **eligible** (assumed in the demo, labelled — G16).
+2. Python filters that product's contract rows to those where the **holder is bound
+   to the sale** (G5, revised 2026-10-07 — see below), the contract was **in force on
+   the effective date** (G13), and the hospital is **eligible** (assumed in the demo,
+   labelled — G16).
+
+   **Who must hold the contract — settled 2026-10-07 by the user ("Strict: A and B").**
+   A contract is a promise by its holder; money is owed back only by a party bound
+   by it. A claim counts when:
+   - **A — the seller holds it** (holder == order's billing supplier): the seller
+     broke its own promise. Added after the VA data showed most contracts are held
+     by sellers/resellers, not makers.
+   - **B — the maker holds it** (holder == order's manufacturer): the distributor that
+     delivered must honour the maker's price (GPO / chargeback model).
+   - **C — anyone else holds it**: **not a claim.** Reported as a *savings
+     opportunity* ("buy from the holder next time") — the forward/monitor mode.
+     Rejected alternative "holder OR registry manufacturer" would claim case C: a
+     false claim against a vendor that made no promise.
+   Holder names match exactly (case/space folded) until vendor entity resolution
+   exists, so a name variant can turn an A/B into a C — missed money, never a false
+   claim, and visible in the savings list rather than dropped.
 3. Within one contract, the newest amendment wins (today's "newest wins" policy is
    correct *only* inside one contract, never across contracts).
 4. If more than one valid price remains, **auto-claim at the highest** — the smallest,
@@ -405,6 +422,92 @@ Carried forward from PR 2:
 - The 0.1% false-positive budget is untested against real catalog wording — PR 3.
 - The model is still called when a flagged line is in the shortlist; its pick goes to
   the human as a suggestion. Skipping the call is an option if cost ever matters.
+
+**PR 3 split** into 3a (real sources) and 3b (product grouping, persisted embeddings,
+human gate re-keyed on identity) to keep each reviewable.
+
+**PR 3a status (2026-10-06, branch `step1-pr3a-real-sources`, stacked on PR 2):**
+`BACKTRACE_CORPUS_SOURCE=real` loads VA NAC contract prices enriched from openFDA,
+from a dated snapshot in `data/raw/` (gitignored). `python -m src.sources.harvest`
+is the only network code; `--resume` finishes an interrupted run.
+`python main.py --ingest-report` shows rows read/kept/rejected/joined/flagged/merged.
+
+Neither source has a usable bulk API for this: openFDA is a real API; the VA has none,
+but its public search page is a plain GET returning a table (400 rows/page), and a
+detail page per item gives the price unit and dates. Contact details on those pages
+are never stored.
+
+Measured on snapshot `2026-10-05-wide` (12 single-word terms, 800 detail pages, 900
+keyless openFDA queries):
+
+| | |
+|---|---|
+| Contract lines | **24,883** (27,249 read; 2 rejected for price; 2,364 duplicates merged) |
+| Contracts / contractors | 325 / 314 |
+| Dates known | 100% — one detail page per contract dates every row on it |
+| Unit known | **3%** — needs one detail page per item; 800 of ~25k fetched |
+| Per-each price computable | 3% |
+| Maker joined from FDA | 13% (3,287 joins; refusals: no exact part 19,813, shared by several makers 1,471, too generic 1,466, descriptions disagree 1,210) |
+| Flagged by vetting | **0** — injection patterns: 0 false positives on 24,883 real descriptions (G10 measured) |
+| Same SKU on >1 contract row | 878 · identical descriptions on >1 row: 926 (G6 is real) |
+
+Findings the live data forced, each fixed with a regression test:
+1. **False registry join** — part "150" joined a Foley catheter to another maker's
+   sclerotherapy catheter. Joins now need a ≥5-char part, one maker, and two shared
+   product words.
+2. **SKU false positives, twice** — an allowlist rejected spaces (3/22 lines), the next
+   rejected `, * " & =` (174/24,883 = 0.7%, 7× budget). Replaced by `sku_is_clean()`
+   (rejects control chars, fences, injection phrasing, our own field syntax, >64
+   chars) and the SKU is now printed as an escaped literal: `reverse-map/v5`.
+3. **Phrase search is narrow** — 6 phrases returned 205 of 510,681 lines; single
+   words return thousands. Default terms are single words.
+4. **Harvest was fragile** — a DNS failure lost all in-memory detail results. Detail
+   failures are now counted and skipped, progress saved every 50 pages, `--resume`.
+
+Carried forward from PR 3a:
+- **Units are the binding constraint.** At 3% known, almost every claim will route
+  to a human under Decision 1. Fix is a long detail harvest (~7 h at 1 req/s; run
+  with `--resume --details 25000`, can span nights) or another unit source.
+- **FSS contracts are often held by resellers**, not manufacturers. Resolved
+  2026-10-07: Decision 1 now accepts holder == seller (A) or holder == maker (B);
+  other holders are savings opportunities (§5.2). Implementation lands in PR 3b.
+- FDA join rate 13% keyless; an `OPENFDA_API_KEY` lifts the 900-query cap.
+- VA "EA" sometimes prices a pack (e.g. one catheter at $1,171). This overstates the
+  contract price, which shrinks a claim — the safe direction — but it is noise.
+
+**PR 3b status (2026-10-08, branch `step1-pr3b-products`, stacked on PR 3a):**
+- **Shortlist = products.** `retrieve_*` return k distinct products; each
+  `CandidateMatch` carries `group` (every contract row for that product). Rows join
+  only on a shared normalised part number plus the same registry maker or identical
+  description — under-merge costs a human look, over-merge would cost a false claim.
+- **Holder rule** (settled 2026-10-07) is in `select_contract_price`: seller holds it
+  (A) or maker holds it (B) → claimable; anyone else → `SAVINGS_OPPORTUNITY`.
+- **Embeddings persist** to `data/cache/` keyed on a hash of the exact texts + model.
+- Flags, the prompt's vendor field (`reverse-map/v6`, lists all vendors of a product)
+  and the human gate see the whole group; the gate rebuilds by identity, not SKU.
+- **Deadlock found and fixed:** the first semantic query held the embedding lock
+  while the model load took it again — every run hung. Pinned by a threaded test.
+
+Measured on the 24,883-line corpus:
+
+| | |
+|---|---|
+| Products | 24,717 (152 products span more than one contract row) |
+| Shortlists repeating a product, row-level → product-level | 1% → **0%** (300 sampled queries) |
+| Embedding the corpus, first run → cached | 155 s → **0.1 s** |
+| Remaining startup cost | corpus parse 22 s, `sentence_transformers` import 11 s |
+| Query latency | ~80 ms |
+
+**G6 was smaller than feared.** "878 SKUs on >1 row" were mostly *different*
+products sharing a part number (different maker or description), which the
+conservative key correctly keeps apart. The hard retrieval problem in real data is
+near-duplicates — same product family, different size or pack — which is exactly
+what Step 2's recall@k measurement is for.
+
+Carried forward from PR 3b:
+- `select_contract_price` is still not wired into the scan: it needs order lines that
+  name a seller and a maker, which PR 4's degraded real orders will carry.
+- Corpus parse (22 s) could be cached like the embeddings; not yet worth it.
 
 ---
 

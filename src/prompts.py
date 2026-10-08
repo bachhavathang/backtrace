@@ -37,7 +37,12 @@ import json
 # reason this string is written into every ledger entry and every call-log record.
 # v4: contract lines are fenced in <contract_lines>, their text is JSON-escaped,
 # and the system prompt treats them as untrusted data like the order text.
-PROMPT_VERSION = "reverse-map/v4"
+# v5: the SKU is printed as an escaped string literal too. Real catalog numbers
+# carry commas, asterisks and quotes ("MC*PB2411Y"); printed raw, a quote could end
+# the field. chosen_sku is still echoed without the quotes.
+# v6: a candidate is a PRODUCT; its vendor field lists every vendor holding a
+# contract for it ("A; B"). Identical for a product on one contract.
+PROMPT_VERSION = "reverse-map/v6"
 
 
 # --- The stable, cacheable prefix ----------------------------------------
@@ -181,6 +186,13 @@ contract record."""
 
 # --- The volatile suffix -------------------------------------------------
 
+def _vendors(candidate) -> str:
+    """Every vendor holding a contract for this product, so a vendor named in the
+    order can be weighed against all of them, not just the best-scoring row."""
+    rows = getattr(candidate, "rows", None) or [candidate.contract]
+    return "; ".join(dict.fromkeys(r.vendor for r in rows))
+
+
 def _literal(text: str) -> str:
     """One field as a JSON string literal: quotes and newlines escaped, non-ASCII kept."""
     return json.dumps(text, ensure_ascii=False)
@@ -212,7 +224,7 @@ def build_user_message(order_text: str, candidates: list) -> str:
     lines = []
     for i, c in enumerate(candidates, start=1):
         lines.append(
-            f"{i}. sku={c.contract.sku} | vendor={_literal(c.contract.vendor)} "
+            f"{i}. sku={_literal(c.contract.sku)} | vendor={_literal(_vendors(c))} "
             f"| description={_literal(c.contract.description)}"
         )
     block = "\n".join(lines) if lines else "(none)"
