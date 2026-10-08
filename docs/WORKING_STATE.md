@@ -621,6 +621,12 @@ push/PR. `tests/test_policy_gate.py` replays 915 recorded verdicts
 (`evals/fixtures/`) and fails the build on any false claim at the shipped bars — plus a
 test that it *does* fire at 0.80.
 
+**CI's first runs caught two real bugs**, both now fixed: plain `pytest` (what the README
+documents) could not import `src/` — only `python -m pytest` worked (`pytest.ini` now sets
+`pythonpath`); and the project only ran on Windows — the synthetic contract files carry a
+cp1252 em dash that the platform-default `read_text()` decoded on Windows and crashed on
+on Linux (`ingest.read_document` now tries UTF-8, then cp1252).
+
 **Not changed:** `no_match_bar` (never fires on real data; harmless; replacing it is a
 design question for later). Synthetic eval at k=10/hybrid: 0 false claims at every bar.
 
