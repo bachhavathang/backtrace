@@ -22,3 +22,5 @@ Athang_Bachhav_CV.*
 data/raw/
 # Corpus embeddings: derived, keyed on content, rebuilt on a miss.
 data/cache/
+# Generated eval sets, rebuilt from a snapshot + seed.
+data/derived/
