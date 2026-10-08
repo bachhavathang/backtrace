@@ -400,7 +400,8 @@ def sibling_not_excluded(order_text: str, chosen, others: list) -> bool:
     return False
 
 
-def choice_flags(order_text: str, candidates: list, chosen_index: int) -> list[str]:
+def choice_flags(order_text: str, candidates: list, chosen_index: int,
+                 variant_words: frozenset = frozenset()) -> list[str]:
     """Flags owed to the model's pick. Empty for an abstention."""
     if not chosen_index or chosen_index > len(candidates):
         return []
@@ -411,4 +412,59 @@ def choice_flags(order_text: str, candidates: list, chosen_index: int) -> list[s
         flags.append(FLAG_NUMBER_CONFLICT)
     if sibling_not_excluded(order_text, chosen, others):
         flags.append(FLAG_SIBLING)
+    if unconfirmed_variant(order_text, chosen, variant_words):
+        flags.append(FLAG_UNCONFIRMED_VARIANT)
     return flags
+
+
+# --- 5b. Unconfirmed variant word ------------------------------------------------
+#
+# The case that beat the sibling check on a fresh, locked run: "'wullstein' drsg.
+# forecps" — the plain forceps is not in the catalog, so the only Wullstein left is
+# the SERRATED one, no rival is shortlisted, and the model claimed it at 0.85. The
+# pick carries a variant word the order never asked for. corpus.variant_vocabulary
+# learns which words are variant words from the catalog's own one-word siblings.
+
+FLAG_UNCONFIRMED_VARIANT = "match_has_variant_word_order_lacks"
+ESCALATING_FLAGS = ESCALATING_FLAGS | {FLAG_UNCONFIRMED_VARIANT}
+
+# Shorthand the PRODUCTION system prompt already teaches the model (prompts.py
+# glossary) — deliberately not the eval's degradation table, which would grade
+# this check against its own answer key.
+_GLOSSARY = {
+    "pf": ("powder", "free"), "lg": ("large",), "md": ("medium",), "med": ("medium",),
+    "sm": ("small",), "xl": ("extra", "large"), "cath": ("catheter",),
+    "syr": ("syringe",), "glv": ("gloves", "glove"), "drp": ("drape",),
+}
+
+
+def _one_edit_apart(a: str, b: str) -> bool:
+    """Substitution, insertion, deletion or adjacent swap — a typo, not a new word."""
+    if a == b or abs(len(a) - len(b)) > 1 or min(len(a), len(b)) < 4:
+        return a == b
+    if len(a) == len(b):
+        diff = [i for i in range(len(a)) if a[i] != b[i]]
+        return len(diff) == 1 or (len(diff) == 2 and diff[1] == diff[0] + 1
+                                  and a[diff[0]] == b[diff[1]] and a[diff[1]] == b[diff[0]])
+    short, long_ = sorted((a, b), key=len)
+    return any(long_[:i] + long_[i + 1:] == short for i in range(len(long_)))
+
+
+def _confirmed(word: str, order_words: set[str]) -> bool:
+    for t in order_words:
+        if t == word or _one_edit_apart(t, word):
+            return True
+        if len(t) >= 3 and (word.startswith(t) or t.startswith(word)):
+            return True
+        if word in _GLOSSARY.get(t, ()):
+            return True
+    return False
+
+
+def unconfirmed_variant(order_text: str, chosen, variant_words: frozenset) -> bool:
+    """The chosen product carries a variant word the order never mentions."""
+    if not variant_words:
+        return False
+    order_words = set(re.findall(r"[a-z]+", unicodedata.normalize("NFKC", order_text or "").lower()))
+    mine = {w for w in re.findall(r"[a-z]+", chosen.contract.description.lower()) if len(w) >= 3}
+    return any(not _confirmed(w, order_words) for w in mine & variant_words)

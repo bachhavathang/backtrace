@@ -195,3 +195,21 @@ def test_review_rebuilds_the_shortlist_by_identity_not_sku(monkeypatch):
                               candidate_keys=[identity_string(fss)])
     rebuilt = agent.candidates_for(result)
     assert [c.contract.contract_id for c in rebuilt] == ["FSS"]
+
+
+# --- Locks: every cached builder must work as the FIRST call on a corpus ----------
+
+@pytest.mark.parametrize("builder", ["variant_vocabulary", "bm25_index", "product_groups"])
+def test_each_cached_builder_works_on_a_cold_corpus(builder, monkeypatch):
+    # Regression: variant_vocabulary held the groups lock and called
+    # product_groups, which took it again. It only ever worked if something else
+    # had grouped the corpus first. Each builder runs cold, in a thread with a timeout.
+    for name in ("_groups_for", "_bm25_for", "_variants_for"):
+        monkeypatch.setattr(corpus_mod, name, None)
+    rows = [_row("A", desc="Forceps dressing serrated"), _row("B", desc="Forceps dressing")]
+    done = []
+    t = threading.Thread(target=lambda: done.append(getattr(corpus_mod, builder)(rows)))
+    t.start()
+    t.join(timeout=10)
+    assert not t.is_alive(), f"{builder} deadlocked on a cold corpus"
+    assert done

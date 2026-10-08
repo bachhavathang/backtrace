@@ -211,7 +211,8 @@ def _sha(text: str) -> str:
 # --- The one public call --------------------------------------------------
 
 def adjudicate(order_id: str, order_text: str, candidates: list,
-               tier: Tier) -> tuple[guardrails.Verdict, CallRecord]:
+               tier: Tier, variant_words: frozenset = frozenset()
+               ) -> tuple[guardrails.Verdict, CallRecord]:
     """Ask a model which shortlisted contract line is the same product. Never raises.
 
     `order_text` is untrusted purchase-order free text; it is sanitised here so
@@ -298,7 +299,8 @@ def adjudicate(order_id: str, order_text: str, candidates: list,
     verdict = guardrails.validate_verdict(raw, candidates, clean.flags)
     # Deterministic second opinions on the pick: a number the order states that the
     # match lacks, or a near-identical rival the order gives no reason to reject.
-    for flag in guardrails.choice_flags(clean.text, candidates, verdict.chosen_index):
+    for flag in guardrails.choice_flags(clean.text, candidates, verdict.chosen_index,
+                                        variant_words):
         if flag not in verdict.flags:
             verdict.flags.append(flag)
     record.ok = True

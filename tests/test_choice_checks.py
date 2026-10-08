@@ -83,3 +83,71 @@ def test_abstention_owes_no_choice_flags():
 def test_choice_flags_escalate():
     v = g.Verdict(1, "30-4138", 0.99, False, "r", [g.FLAG_SIBLING])
     assert v.must_escalate
+
+
+# --- Rule 3: unconfirmed variant word (off by default; see config.VARIANT_CHECK) ----
+
+VOCAB = frozenset({"serrated", "curved", "stylet", "sterile", "large"})
+
+
+def test_variant_word_the_order_never_mentions_flags():
+    # The case that beat the first two checks on a fresh run: the plain Wullstein
+    # forceps was not in the catalog, so only the serrated one could be shortlisted.
+    serrated = _c("FORCEPS,WULLSTEIN DRESSING,SERRATED,", "214000F")
+    assert g.unconfirmed_variant("'wullstein' drsg. forecps", serrated, VOCAB)
+
+
+def test_variant_word_in_the_order_is_confirmed():
+    assert not g.unconfirmed_variant("wullstein serrated forceps", _c("WULLSTEIN SERRATED"), VOCAB)
+
+
+@pytest.mark.parametrize("order", ["forceps serated", "forceps serr", "glove lg"])
+def test_typos_prefixes_and_glossary_confirm(order):
+    chosen = _c("Forceps serrated" if "ser" in order else "Glove large")
+    assert not g.unconfirmed_variant(order, chosen, VOCAB)
+
+
+def test_no_vocabulary_means_no_flag():
+    assert not g.unconfirmed_variant("forceps", _c("FORCEPS SERRATED"), frozenset())
+
+
+def test_rule_three_is_off_unless_given_a_vocabulary():
+    cands = [_c("FORCEPS WULLSTEIN SERRATED")]
+    assert g.choice_flags("wullstein forceps", cands, 1) == []
+    assert g.choice_flags("wullstein forceps", cands, 1, VOCAB) == [g.FLAG_UNCONFIRMED_VARIANT]
+
+
+@pytest.mark.parametrize("a,b,ok", [
+    ("forecps", "forceps", True), ("neelde", "needle", True), ("serated", "serrated", True),
+    ("cat", "cut", False), ("large", "lodge", False)])
+def test_one_edit_apart(a, b, ok):
+    assert g._one_edit_apart(a, b) is ok
+
+
+def test_vocabulary_learns_add_ons_not_swaps():
+    from src import corpus as C
+    def row(sku, desc):
+        return ContractPrice(sku=sku, description=desc, vendor="V", holder="V",
+                             contracted_unit_price=1.0, source="s", contract_id=sku)
+    # Distinct alphabetic names: words are letters-only, so "model0".."model3" would
+    # all read as "model" and collapse into one sibling slot (counted once, by design).
+    names = ("adson", "kelly", "mayo", "crile")
+    rows = []
+    for n in names:      # four products that exist with and without "serrated"
+        rows += [row(f"P{n}", f"forceps dressing {n}"), row(f"S{n}", f"forceps dressing {n} serrated")]
+    for n in names:      # four "dressing" vs "tissue" SWAPS — different products
+        rows += [row(f"D{n}", f"clamp dressing {n}"), row(f"T{n}", f"clamp tissue {n}")]
+    vocab = C.variant_vocabulary(rows)
+    assert "serrated" in vocab
+    assert "tissue" not in vocab and "dressing" not in vocab
+
+
+def test_vocabulary_ignores_grammar_and_packaging():
+    from src import corpus as C
+    def row(sku, desc):
+        return ContractPrice(sku=sku, description=desc, vendor="V", holder="V",
+                             contracted_unit_price=1.0, source="s", contract_id=sku)
+    rows = []
+    for n in ("alpha", "bravo", "charlie", "delta"):
+        rows += [row(f"P{n}", f"gauze sponge {n}"), row(f"B{n}", f"gauze sponge {n} box")]
+    assert "box" not in C.variant_vocabulary(rows)

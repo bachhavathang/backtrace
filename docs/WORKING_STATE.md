@@ -634,6 +634,61 @@ design question for later). Synthetic eval at k=10/hybrid: 0 false claims at eve
 variant word ("serrated") the order never mentions and no rival is shown — derived from
 the corpus's own sibling differences, then **one more fresh, locked run (~$1.50)**.
 
+**Step 3 merged** as #7.
+
+### Rule 3 — "unconfirmed variant word" (2026-10-09, branch `step3b-variant-check`)
+
+Targets the case that beat the first two checks: the order's product is not in the
+catalog, so its sibling is the only one shortlisted ("'wullstein' drsg. forecps" →
+the SERRATED forceps at 0.85). No rival is shown, so the sibling check has nothing to
+compare. Rule 3 escalates a pick whose product carries an **optional qualifier** the
+order never mentions.
+
+- **Vocabulary learned from the catalog**, not hand-listed (`corpus.variant_vocabulary`):
+  words that appear as a one-word *add-on* between products from one holder (the same
+  product exists with and without it), seen in ≥ 3 places, minus grammar/packaging.
+  186 words on the real corpus (198 before removing grammar/packaging): serrated, curved, straight, sterile, lock, stylet…
+  Linear time (0.5 s on 24,717 products); a first pairwise version timed out.
+- **Confirmation** tolerates prefixes ("ster"), one-letter typos ("forecps"), and only
+  the shorthand the *production* prompt glossary teaches — not the eval's degradation
+  table, which would grade the check against its own answer key.
+- Iterations, all measured free by replay: all one-word differences (633 words) →
+  auto-claims halved; add-ons only → better; minus grammar/packaging → best, still
+  below two rules at 0.90.
+
+| Setup | seed-7 tune | seed-7 test | seed-11 test |
+|---|---|---|---|
+| 2 rules @ 0.90 (shipped) | 0 / 38% / 40% | 0 / 32% / 47% | 0 / 41% / 37% |
+| 3 rules @ 0.80 | 0 / 32% / 48% | 0 / 25% / 53% | 0 / 34% / 43% |
+
+(false claims / auto-claim recall / escalation)
+
+**Ships OFF** (`config.VARIANT_CHECK`, env `BACKTRACE_VARIANT_CHECK=1`). It is
+deterministic, so one paid fresh run can be replayed under both setups for free:
+`python -m evals.real_eval --replay --checks [--variant-check]`.
+
+> **Pre-registered decision (written before the run):** on the next fresh, locked run,
+> ship the setup with **zero false claims and the higher auto-claim recall**. If both
+> are zero → keep rule 3 **off** (two rules @ 0.90, simpler). If only rule 3 is zero →
+> turn it **on** and re-choose its bar on that run's *tune* half only. If neither →
+> no ship; analyse first.
+
+**Also found:** a second instance of the same lock bug — `variant_vocabulary` held the
+groups lock and called `product_groups`, which took it again; it only worked when
+something else had grouped the corpus first. Lock is now re-entrant, and a test runs
+every cached builder cold, in a thread with a timeout.
+
+**The paid run, when credits are available** (after the overnight unit download, so
+the price rule sees units):
+```
+python -m evals.real_orders --seed 23
+python -m evals.real_eval --seed 23 --split test --budget 2
+python -m evals.real_eval --seed 23 --replay --checks                    # 2 rules
+python -m evals.real_eval --seed 23 --replay --checks --variant-check    # 3 rules
+```
+Expected ~$1.50. Note the unit download changes the snapshot, so seed 23's orders and
+prices come from the fuller data; the recorded fixtures stay valid (replay only).
+
 Carried forward from PR 3b:
 - `select_contract_price` is still not wired into the scan: it needs order lines that
   name a seller and a maker, which PR 4's degraded real orders will carry.
