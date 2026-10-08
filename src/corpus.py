@@ -8,12 +8,15 @@ changes one price). All of it must become one searchable index.
 What lives here:
   - build_corpus(): the configured sources (src/ingest.py) -> one unified
     list[ContractPrice], with amendments of a contract collapsed
-  - two retrievers over that index:
+  - retrievers over that index, all returning distinct PRODUCTS:
       retrieve_keyword   token overlap. No model, no key — the pipeline and the
                          whole test suite run without either.
-      retrieve_semantic  sentence embeddings (all-MiniLM-L6-v2). What the scan
-                         actually uses; the model and corpus vectors are built
-                         once and shared across concurrent workers.
+      retrieve_semantic  sentence embeddings (all-MiniLM-L6-v2), vectors cached
+                         on disk.
+      retrieve_hybrid    BM25 + embeddings fused by rank. What the scan uses —
+                         on 24,717 real products it found the right one in the
+                         top 3 for 85% of held-out orders vs 63% for embeddings
+                         alone (evals/retrieval_recall.py).
 
 Keeping both is deliberate: the keyword retriever is the control that shows why
 the semantic one earns its cost. It misses "foley cath" ~ "Foley Catheter", and
@@ -36,7 +39,8 @@ import hashlib
 import re
 import threading
 
-from .config import CORPUS_SOURCE, EMBED_CACHE
+from .config import (CORPUS_SOURCE, EMBED_CACHE, FUSION_DEPTH, HYBRID_SEMANTIC_WEIGHT,
+                     RRF_K)
 from .ingest import IngestReport, load_all, sources_for
 from .schema import CandidateMatch, ContractPrice
 from .sources.openfda import normalise_part
@@ -152,10 +156,14 @@ def product_groups(corpus: list[ContractPrice]) -> dict[tuple[str, str], list[Co
 
 
 def _top_products(ranked: list[int], scores: list[float], corpus: list[ContractPrice],
-                  k: int) -> list[CandidateMatch]:
-    """Walk rows best-first, keeping the best row of each product until k products."""
+                  k: int, exclude: frozenset = frozenset()) -> list[CandidateMatch]:
+    """Walk rows best-first, keeping the best row of each product until k products.
+
+    `exclude` hides whole products, so an eval can search "the corpus minus the
+    held-out products" without re-embedding 25k lines for a slightly smaller set.
+    """
     groups = product_groups(corpus)
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str]] = set(exclude)
     out: list[CandidateMatch] = []
     for i in ranked:
         row = corpus[i]
@@ -177,8 +185,8 @@ def _tokens(s: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", s.lower()))
 
 
-def retrieve_keyword(query: str, corpus: list[ContractPrice], k: int = 3
-                     ) -> list[CandidateMatch]:
+def retrieve_keyword(query: str, corpus: list[ContractPrice], k: int = 3,
+                     exclude: frozenset = frozenset()) -> list[CandidateMatch]:
     """Token-overlap (Jaccard-ish) retrieval. Works with no API key.
 
     Good enough to run the pipeline and tests; deliberately weak on synonyms and
@@ -190,7 +198,57 @@ def retrieve_keyword(query: str, corpus: list[ContractPrice], k: int = 3
         c = _tokens(cp.description + " " + cp.sku)
         scores.append(round(len(q & c) / len(q | c), 3) if (q | c) else 0.0)
     ranked = sorted(range(len(corpus)), key=lambda i: scores[i], reverse=True)
-    return _top_products(ranked, scores, corpus, k)
+    return _top_products(ranked, scores, corpus, k, exclude)
+
+
+class BM25:
+    """Okapi BM25 over contract text, with an inverted index. No dependency.
+
+    Jaccard overlap treats "glove" and "aquacel" alike. BM25 weights a token by how
+    rare it is across the corpus, so a brand, a part number or "6-mil" — the words
+    that actually single out a product in 25k real lines — count for more than the
+    product family word every glove shares.
+    """
+
+    def __init__(self, corpus: list[ContractPrice], k1: float = 1.2, b: float = 0.75) -> None:
+        import math
+        docs = [_tokens(c.description + " " + c.sku) for c in corpus]
+        lengths = [len(d) for d in docs]
+        self.avg = (sum(lengths) / len(lengths)) if lengths else 1.0
+        self.k1, self.b, self.lengths = k1, b, lengths
+        self.postings: dict[str, list[int]] = {}
+        for i, d in enumerate(docs):
+            for t in d:
+                self.postings.setdefault(t, []).append(i)
+        n = len(docs)
+        self.idf = {t: math.log(1 + (n - len(p) + 0.5) / (len(p) + 0.5))
+                    for t, p in self.postings.items()}
+
+    def scores(self, query: str) -> dict[int, float]:
+        out: dict[int, float] = {}
+        for t in _tokens(query):
+            idf = self.idf.get(t)
+            if idf is None:
+                continue
+            for i in self.postings[t]:
+                # Binary term frequency: contract lines are short and rarely repeat a word.
+                norm = 1 - self.b + self.b * self.lengths[i] / self.avg
+                out[i] = out.get(i, 0.0) + idf * (self.k1 + 1) / (1 + self.k1 * norm)
+        return out
+
+
+_bm25_for: tuple[int, int] | None = None
+_bm25: BM25 | None = None
+
+
+def bm25_index(corpus: list[ContractPrice]) -> BM25:
+    global _bm25_for, _bm25
+    ident = (id(corpus), len(corpus))
+    if _bm25_for != ident:
+        with _groups_lock:
+            if _bm25_for != ident:
+                _bm25, _bm25_for = BM25(corpus), ident
+    return _bm25
 
 
 # Module-level cache so we load the model + embed the corpus only ONCE,
@@ -224,7 +282,7 @@ def warm_retrieval() -> None:
     load (seconds) that would land on whichever order happened to go first and
     look like a slow order rather than a slow startup.
     """
-    retrieve_semantic("warmup", build_corpus(), k=1)
+    retrieve_hybrid("warmup", build_corpus(), k=1)      # loads the model, vectors and BM25 index
 
 
 def _embedding_texts(corpus: list[ContractPrice]) -> list[str]:
@@ -270,9 +328,8 @@ def _load_or_embed(corpus: list[ContractPrice]):
     return emb
 
 
-def retrieve_semantic(query: str, corpus: list[ContractPrice], k: int = 3
-                      ) -> list[CandidateMatch]:
-    """Embedding-based retrieval. Ranks by cosine similarity of MEANING."""
+def _semantic_ranking(query: str, corpus: list[ContractPrice]) -> tuple[list[int], list[float]]:
+    """Row indices best-first by cosine similarity, and every row's similarity."""
     global _corpus_cache, _corpus_embeddings
     import torch
     from sentence_transformers import util
@@ -287,4 +344,47 @@ def retrieve_semantic(query: str, corpus: list[ContractPrice], k: int = 3
     q_emb = _get_model().encode(query, convert_to_tensor=True, normalize_embeddings=True)
     scores = util.cos_sim(q_emb, _corpus_embeddings.to(q_emb.device))[0]  # one per row
     ranked = torch.argsort(scores, descending=True).tolist()
-    return _top_products(ranked, scores.tolist(), corpus, k)
+    return ranked, scores.tolist()
+
+
+def retrieve_semantic(query: str, corpus: list[ContractPrice], k: int = 3,
+                      exclude: frozenset = frozenset()) -> list[CandidateMatch]:
+    """Embedding-based retrieval. Ranks by cosine similarity of MEANING."""
+    ranked, scores = _semantic_ranking(query, corpus)
+    return _top_products(ranked, scores, corpus, k, exclude)
+
+
+def fuse(rankings: list[tuple[float, list[int]]], depth: int = FUSION_DEPTH,
+         rrf_k: int = RRF_K) -> list[int]:
+    """Weighted reciprocal rank fusion: a row scores w / (rrf_k + rank) per ranking.
+
+    Rank-based, not score-based, on purpose: BM25 scores and cosine similarities
+    live on unrelated scales, and adding them would let whichever happens to run
+    larger quietly decide every shortlist.
+    """
+    score: dict[int, float] = {}
+    for weight, ranking in rankings:
+        if weight <= 0:
+            continue
+        for r, i in enumerate(ranking[:depth]):
+            score[i] = score.get(i, 0.0) + weight / (rrf_k + r + 1)
+    return sorted(score, key=score.get, reverse=True)
+
+
+def retrieve_hybrid(query: str, corpus: list[ContractPrice], k: int = 3,
+                    exclude: frozenset = frozenset()) -> list[CandidateMatch]:
+    """What the scan uses: BM25 and embeddings, fused by rank (config.HYBRID_*).
+
+    `similarity` on each candidate stays the cosine similarity, so the tier router
+    and no_match_bar keep reading the number they were designed around.
+    """
+    sem_ranked, sem_scores = _semantic_ranking(query, corpus)
+    bm = bm25_index(corpus).scores(query)
+    bm_ranked = sorted(bm, key=bm.get, reverse=True)
+    ranked = fuse([(1.0, bm_ranked), (HYBRID_SEMANTIC_WEIGHT, sem_ranked)])
+    # Fusion only sees the top FUSION_DEPTH of each ranking. On a tiny corpus, or
+    # with many products excluded, that can leave fewer than k products; the rest
+    # of the semantic order fills in, so the shortlist is never short for no reason.
+    in_fused = set(ranked)
+    ranked += [i for i in sem_ranked if i not in in_fused]
+    return _top_products(ranked, sem_scores, corpus, k, exclude)

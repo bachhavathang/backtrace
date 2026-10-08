@@ -39,7 +39,7 @@ from typing import TypedDict
 
 from .config import RETRIEVAL_K, THRESHOLDS, Thresholds, pick_tier
 from .corpus import (build_corpus, corpus_version, identity_string, product_groups,
-                     product_key, retrieve_semantic)
+                     product_key, retrieve_hybrid)
 from .llm import adjudicate
 from .recovery import record_recovery
 from .schema import (CandidateMatch, ContractPrice, MatchDecision,
@@ -72,7 +72,7 @@ def node_retrieve(state: State) -> State:
     corpus = build_corpus()
     order = state["order"]
     query = order.raw_description + (f" {order.sku_hint}" if order.sku_hint else "")
-    state["candidates"] = retrieve_semantic(query, corpus, k=RETRIEVAL_K)
+    state["candidates"] = retrieve_hybrid(query, corpus, k=RETRIEVAL_K)
     return state
 
 

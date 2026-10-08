@@ -532,6 +532,43 @@ by a regression test, plus a test that the audit fires on a mislabelled case.
 Known limit: `truncate` can strip every identifying word ("the blcak knight is",
 from a brand-led description). Realistic for vague orders; Step 2 will count them.
 
+**PR 4 merged** as #5 (`31c4994`).
+
+### Step 2 — retrieval re-baselined (2026-10-08, branch `step2-retrieval-recall`)
+
+`python -m evals.retrieval_recall [--split test|tune|all] [--keyword]` — no API calls.
+Searches the corpus minus held-out products; a hit is the right *product* in the top k.
+
+**Test split, 272 orders, 24,717 products:**
+
+| Retriever | @1 | @3 | @5 | @10 | @20 |
+|---|---|---|---|---|---|
+| Embeddings (what the scan used) | 48.9% | 63.2% | 69.9% | 80.9% | 86.0% |
+| Jaccard keyword (the "control") | 71.7% | 84.6% | 88.2% | 92.6% | 94.1% |
+| BM25 | 72.4% | 85.3% | 89.3% | 94.9% | 96.0% |
+| **Hybrid (BM25 + 0.1 × embeddings)** | 72.4% | 84.6% | 89.3% | **94.9%** | 96.0% |
+
+Findings:
+1. **Embeddings alone were the wrong retriever for real catalog text.** Part numbers,
+   brands and sizes are exact tokens; a sentence embedding blurs them. The 7-line
+   corpus could never show this. Caveat: orders are degraded *from* the source text,
+   which flatters lexical retrieval; independently typed orders share fewer exact words.
+2. **Hybrid weight chosen on the tune split** (0.1 beat 0, 0.25, 0.5, 1.0 at @3: 85.7%)
+   and only then scored on test, where it ties pure BM25. Kept for shorthand/synonyms.
+   Synthetic corpus: 20/20 @3 for every weighting; @1 rose 95% → 100%.
+3. **`RETRIEVAL_K` 3 → 10** — the knee of the curve (@10 94.9%, @20 96.0%). A missed
+   product is silent lost money; a candidate costs ~40 uncached tokens.
+4. **`no_match_bar` never fires on real data.** Top-1 cosine: median 0.778 when the
+   product is in the corpus, 0.763 when it is not — no threshold separates them. The
+   README's "largest single saving" assumed it removed over half the lines; corrected.
+5. Held-out operators cost ~5 points @10 (87.4% vs 92.4% hybrid) — the size of the
+   optimism a tune-only score would have carried.
+
+**Step 3 must now:** re-sweep `high_bar`/`low_bar` at k=10 with hybrid retrieval (bars
+were set at k=3); decide whether `no_match_bar` should be removed or re-founded on a
+signal that separates (e.g. the model's own NO_MATCH); measure escalation rate on the
+real orders. All need an API key.
+
 Carried forward from PR 3b:
 - `select_contract_price` is still not wired into the scan: it needs order lines that
   name a seller and a maker, which PR 4's degraded real orders will carry.
