@@ -95,7 +95,7 @@ def test_cache_breakpoint_sits_on_the_system_block():
 
 def test_candidates_are_numbered_and_order_text_is_fenced():
     user = prompts.build_user_message("nitrile gloves lg", CANDIDATES)
-    assert "1. sku=GLV-N100" in user and "2. sku=ACM-GLV-L" in user
+    assert '1. sku="GLV-N100"' in user and '2. sku="ACM-GLV-L"' in user
     assert "<order_text>" in user and "</order_text>" in user
     # No price ever reaches the prompt — the model cannot leak or invent one.
     assert "9.10" not in user and "8.40" not in user

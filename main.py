@@ -201,7 +201,16 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None,
                         help="only scan the first N orders")
     parser.add_argument("--workers", type=int, default=config.MAX_CONCURRENCY)
+    parser.add_argument("--ingest-report", action="store_true",
+                        help="load the configured corpus, report what was kept, "
+                             "dropped and flagged, and exit (no key needed)")
     args = parser.parse_args()
+
+    if args.ingest_report:
+        from src.corpus import ingest_report
+        print(f"corpus source: {config.CORPUS_SOURCE}")
+        print(ingest_report().summary())
+        return
 
     if not config.has_api_key():
         print("ANTHROPIC_API_KEY is not set. Adjudication needs a credential.\n"

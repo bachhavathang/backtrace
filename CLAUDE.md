@@ -87,4 +87,9 @@ python main.py --preflight          # cache eligibility check, makes no calls
 python -m evals.run_eval --offline  # guardrail + retrieval checks, no key
 python -m evals.run_eval --sweep    # full eval + threshold curve
 pytest -q                           # deterministic layers, no key needed
+
+# Real data (opt-in). Harvest once — network, polite, ~10 min — then everything
+# reads the snapshot from disk. data/raw/ is gitignored; tests use tests/fixtures/.
+python -m src.sources.harvest                    # VA contract prices + FDA registry
+BACKTRACE_CORPUS_SOURCE=real python main.py --ingest-report   # kept/dropped/flagged/joined
 ```

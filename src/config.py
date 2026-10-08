@@ -193,6 +193,14 @@ RETRIEVAL_K = 3
 # rolled back by unsetting one variable.
 CORPUS_SOURCE = os.environ.get("BACKTRACE_CORPUS_SOURCE", "synthetic")
 
+# Harvested real data (gitignored). "real" reads BACKTRACE_SNAPSHOT if set, else the
+# newest dated folder here. Snapshots are immutable: a scan names the files it read.
+RAW_DATA = DATA / "raw"
+SNAPSHOT = os.environ.get("BACKTRACE_SNAPSHOT")
+
+# Corpus embeddings, keyed on a hash of the exact texts embedded (gitignored).
+EMBED_CACHE = DATA / "cache"
+
 
 # --- Gateway behaviour ---------------------------------------------------
 
@@ -247,6 +255,19 @@ CACHE_WARM_MIN_BATCH = 12
 # Order descriptions are vendor-controlled free text on a purchase order, so they
 # are untrusted input to the prompt. Cap the length an order line can contribute.
 MAX_ORDER_TEXT_CHARS = 400
+
+# Contract descriptions and vendor names are third-party text too once real
+# catalogs are ingested, and each one is repeated in every prompt whose shortlist
+# it joins — RETRIEVAL_K of them per call. The cap bounds both the attack surface
+# and the uncached half of the prompt. The verbatim text survives in source_text.
+MAX_CONTRACT_TEXT_CHARS = 300
+MAX_VENDOR_CHARS = 120
+
+# Share of contract lines the ingest-side injection check may flag before the
+# offline eval fails. Each flagged line escalates every order it is shown beside,
+# so this is a cost budget, and a sudden jump is the signature of a planted
+# payload (docs/WORKING_STATE.md §5.1, G10 and G23).
+CONTRACT_FLAG_ALERT_RATE = 0.001
 
 
 def pick_tier(top_similarity: float, runner_up_similarity: float) -> Tier:

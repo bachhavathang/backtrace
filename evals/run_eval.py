@@ -49,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import config, guardrails  # noqa: E402
 from src.agent import decide  # noqa: E402
-from src.config import RETRIEVAL_K, THRESHOLDS, Thresholds, pick_tier  # noqa: E402
+from src.config import CONTRACT_FLAG_ALERT_RATE, RETRIEVAL_K, THRESHOLDS, Thresholds, pick_tier  # noqa: E402
 from src.corpus import build_corpus, retrieve_semantic, warm_retrieval  # noqa: E402
 from src.llm import ACCOUNT, adjudicate, warm_cache  # noqa: E402
 from src.schema import MatchDecision, OrderLine  # noqa: E402
@@ -309,6 +309,19 @@ def run_offline(cases: list[dict]) -> int:
     print(f"  false positives on {len(false_positives)}/{len(benign)} benign lines"
           f"{': ' + ', '.join(c['id'] for c in false_positives) if false_positives else ''}")
 
+    # The same check, run over the contract side at ingest (ingest.vet). Every
+    # flagged row blocks auto-claim for every order whose shortlist shows it, so
+    # the rate is a cost as well as a signal: a jump means either noisy patterns
+    # (false positives against real catalog wording) or a planted payload.
+    corpus = build_corpus()
+    flagged = [c for c in corpus if c.needs_verification]
+    rate = len(flagged) / len(corpus) if corpus else 0.0
+    print(f"\nContract vetting ({len(corpus)} contract lines)")
+    print(f"  flagged {len(flagged)}/{len(corpus)} ({rate:.2%}), "
+          f"alert above {CONTRACT_FLAG_ALERT_RATE:.2%}"
+          f"{': ' + ', '.join(c.sku for c in flagged) if flagged else ''}")
+    flag_alert = rate > CONTRACT_FLAG_ALERT_RATE
+
     warm_retrieval()
     records = []
     for case in benign:
@@ -329,7 +342,7 @@ def run_offline(cases: list[dict]) -> int:
     for miss in recall["missed_by_retrieval"]:
         print(f"  MISS {miss['id']}: wanted {miss['expected']}, got {miss['got']}")
 
-    failed = caught < len(injections) or recall["missed_by_retrieval"]
+    failed = caught < len(injections) or recall["missed_by_retrieval"] or flag_alert
     return 1 if failed else 0
 
 

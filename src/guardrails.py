@@ -37,7 +37,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
-from .config import MAX_ORDER_TEXT_CHARS
+from .config import MAX_CONTRACT_TEXT_CHARS, MAX_ORDER_TEXT_CHARS
 
 # Flag constants. These travel with the result into the ledger, so an auditor can
 # see not just that a line was escalated but which guardrail escalated it.
@@ -48,6 +48,7 @@ FLAG_SKU_MISMATCH = "index_sku_disagreement"
 FLAG_BAD_CONFIDENCE = "confidence_out_of_range"
 FLAG_MALFORMED = "malformed_verdict"
 FLAG_LLM_ERROR = "llm_error"
+FLAG_UNVERIFIED_CONTRACT = "unverified_contract_shown"
 
 # Flags that must never be auto-claimed, however confident the model was.
 ESCALATING_FLAGS = frozenset({
@@ -57,6 +58,7 @@ ESCALATING_FLAGS = frozenset({
     FLAG_BAD_CONFIDENCE,
     FLAG_MALFORMED,
     FLAG_LLM_ERROR,
+    FLAG_UNVERIFIED_CONTRACT,
 })
 
 
@@ -111,14 +113,37 @@ class SanitizedText:
         return FLAG_INJECTION in self.flags
 
 
-def sanitize_order_text(raw: str) -> SanitizedText:
-    """Normalise untrusted order text and flag anything that reads as an instruction.
+# Our own fences. Untrusted text must never be able to open or close one, or it
+# could appear to speak from outside the block that marks it as data.
+_FENCE_TAG = re.compile(r"</?\s*(order_text|contract_lines)\s*>", re.IGNORECASE)
 
-    Returns the cleaned text plus flags. Detection never *rejects* the line — a
-    real order that happens to trip a pattern still gets matched, it just cannot
-    be auto-claimed. Silently dropping a line would lose recoverable money; the
-    safe failure is a human looking at it.
+MAX_SKU_CHARS = 64
+_FIELD_SYNTAX = re.compile(r"\s\|\s|\b(sku|vendor|description)\s*=", re.IGNORECASE)
+
+
+def sku_is_clean(sku: str) -> bool:
+    """True when a SKU is safe to print into the prompt and echo back.
+
+    Not a character allowlist. Two allowlists in a row failed against real data:
+    one rejected spaces ("SILQ 21400101003", 3 of 22 lines), the next rejected
+    commas, asterisks and quotes ("MC*PB2411Y" — 174 of 24,883 lines, 0.7%, seven
+    times the false-positive budget). Real catalog numbers use that punctuation.
+    The prompt now prints the SKU as an escaped string literal, the way it prints
+    descriptions, so punctuation cannot break the line. What remains dangerous is
+    what sanitising would have to change — control characters, line breaks, our
+    fence tags, injection phrasing — plus excessive length.
     """
+    if not sku or len(sku) > MAX_SKU_CHARS or sku != sku.strip():
+        return False
+    if _FIELD_SYNTAX.search(sku):
+        # Escaping stops it ending the field, but a part number has no reason to
+        # imitate the candidate line's own " | vendor=" layout.
+        return False
+    clean = _sanitize(sku, MAX_SKU_CHARS, None)
+    return not clean.suspicious and clean.text == sku
+
+
+def _sanitize(raw: str, max_chars: int, truncated_flag: str | None) -> SanitizedText:
     flags: list[str] = []
     text = raw or ""
 
@@ -137,11 +162,11 @@ def sanitize_order_text(raw: str) -> SanitizedText:
     # are the usual way a payload tries to look like a separate prompt section.
     text = re.sub(r"\s+", " ", text).strip()
 
-    # Neutralise our own fence so the payload cannot close the <order_text> block
-    # early and appear to be speaking from outside it.
-    if re.search(r"</?\s*order_text\s*>", text, re.IGNORECASE):
+    # Neutralise our own fences so the payload cannot close a block early and
+    # appear to be speaking from outside it.
+    if _FENCE_TAG.search(text):
         flags.append(FLAG_INJECTION)
-        text = re.sub(r"</?\s*order_text\s*>", "[tag removed]", text, flags=re.IGNORECASE)
+        text = _FENCE_TAG.sub("[tag removed]", text)
 
     for pattern in _INJECTION_PATTERNS:
         if pattern.search(text):
@@ -149,11 +174,56 @@ def sanitize_order_text(raw: str) -> SanitizedText:
                 flags.append(FLAG_INJECTION)
             break
 
-    if len(text) > MAX_ORDER_TEXT_CHARS:
-        text = text[:MAX_ORDER_TEXT_CHARS]
-        flags.append(FLAG_TRUNCATED)
+    if len(text) > max_chars:
+        text = text[:max_chars]
+        if truncated_flag:
+            flags.append(truncated_flag)
 
     return SanitizedText(text=text, flags=flags)
+
+
+def sanitize_order_text(raw: str) -> SanitizedText:
+    """Normalise untrusted order text and flag anything that reads as an instruction.
+
+    Returns the cleaned text plus flags. Detection never *rejects* the line — a
+    real order that happens to trip a pattern still gets matched, it just cannot
+    be auto-claimed. Silently dropping a line would lose recoverable money; the
+    safe failure is a human looking at it.
+    """
+    return _sanitize(raw, MAX_ORDER_TEXT_CHARS, FLAG_TRUNCATED)
+
+
+def sanitize_contract_text(raw: str, max_chars: int = MAX_CONTRACT_TEXT_CHARS
+                           ) -> SanitizedText:
+    """The same treatment for text that arrives in a *contract* — a description or
+    a vendor name.
+
+    Contract text used to be trusted because it was hand-written. Once vendor
+    catalogs are ingested it is third-party text like any order line, and it is
+    worse placed: it reaches the prompt for every order whose shortlist it joins,
+    not just one. A hit here marks the row needs_verification at ingest; see
+    shortlist_flags() for what that does at decision time.
+
+    Truncation is not flagged: a long catalog description is normal, and the
+    verbatim text is kept in ContractPrice.source_text for audit.
+    """
+    return _sanitize(raw, max_chars, None)
+
+
+def shortlist_flags(candidates: list) -> list[str]:
+    """Flags owed to the shortlist itself, independent of what the model answers.
+
+    An unverified contract line that was shown to the model blocks auto-claim
+    whether or not it was chosen: injected text in candidate 2 can steer the
+    choice of candidate 1. (docs/WORKING_STATE.md §5.2, Decision 2.) A line that
+    never reached the prompt — below the retrieval floor — owes nothing, so this
+    is only called for shortlists that are actually sent.
+    """
+    # Every row of a grouped product counts: their vendor names reach the prompt too.
+    rows = [r for c in candidates for r in (getattr(c, "rows", None) or [c.contract])]
+    if any(getattr(r, "needs_verification", False) for r in rows):
+        return [FLAG_UNVERIFIED_CONTRACT]
+    return []
 
 
 # --- 4. Output verification -----------------------------------------------
