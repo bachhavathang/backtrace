@@ -624,7 +624,7 @@ test that it *does* fire at 0.80.
 **CI's first runs caught two real bugs**, both now fixed: plain `pytest` (what the README
 documents) could not import `src/` — only `python -m pytest` worked (`pytest.ini` now sets
 `pythonpath`); and the project only ran on Windows — the synthetic contract files carry a
-cp1252 em dash that the platform-default `read_text()` decoded on Windows and crashed on
+cp1252 em dash that the platform-default `read_text()` decoded on Windows and crashed
 on Linux (`ingest.read_document` now tries UTF-8, then cp1252).
 
 **Not changed:** `no_match_bar` (never fires on real data; harmless; replacing it is a
