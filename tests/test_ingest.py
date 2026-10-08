@@ -11,7 +11,7 @@ import pytest
 
 from src.corpus import build_corpus, corpus_version
 from src.ingest import merge_amendments, sources_for
-from src.recovery import (CLAIMABLE, EXPIRED, NEEDS_REVIEW, NO_VALID_CONTRACT,
+from src.recovery import (CLAIMABLE, EXPIRED, NEEDS_REVIEW, NO_VALID_CONTRACT, SAVINGS_OPPORTUNITY,
                           select_contract_price)
 from src.schema import ContractPrice, OrderLine
 
@@ -118,11 +118,13 @@ def test_contract_binds_manufacturer_not_the_distributor():
 
 
 def test_other_makers_contract_is_never_claimed_and_never_dropped():
-    # Could be a genuine other-maker price (savings, not recovery) or a name
-    # mismatch ("Medline Industries"). Either way: a human, not NO_VALID_CONTRACT.
+    # Could be a genuine other-maker price or a name variant ("Medline Industries").
+    # Under the settled holder rule (2026-10-07) either way it is a savings
+    # opportunity: never a claim, never NO_VALID_CONTRACT, and visible.
     sel = select_contract_price(_order(manufacturer="Medline Industries"),
                                 [_row(holder="Medline")], AS_OF)
-    assert sel.status == NEEDS_REVIEW and sel.chosen is None
+    assert sel.status == SAVINGS_OPPORTUNITY and sel.chosen is None
+    assert sel.lowest is not None
 
 
 def test_unknown_manufacturer_needs_review():

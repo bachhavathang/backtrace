@@ -219,7 +219,9 @@ def shortlist_flags(candidates: list) -> list[str]:
     never reached the prompt — below the retrieval floor — owes nothing, so this
     is only called for shortlists that are actually sent.
     """
-    if any(getattr(c.contract, "needs_verification", False) for c in candidates):
+    # Every row of a grouped product counts: their vendor names reach the prompt too.
+    rows = [r for c in candidates for r in (getattr(c, "rows", None) or [c.contract])]
+    if any(getattr(r, "needs_verification", False) for r in rows):
         return [FLAG_UNVERIFIED_CONTRACT]
     return []
 

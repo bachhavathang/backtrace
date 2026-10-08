@@ -198,6 +198,9 @@ CORPUS_SOURCE = os.environ.get("BACKTRACE_CORPUS_SOURCE", "synthetic")
 RAW_DATA = DATA / "raw"
 SNAPSHOT = os.environ.get("BACKTRACE_SNAPSHOT")
 
+# Corpus embeddings, keyed on a hash of the exact texts embedded (gitignored).
+EMBED_CACHE = DATA / "cache"
+
 
 # --- Gateway behaviour ---------------------------------------------------
 
