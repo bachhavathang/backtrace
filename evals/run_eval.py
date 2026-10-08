@@ -50,7 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src import config, guardrails  # noqa: E402
 from src.agent import decide  # noqa: E402
 from src.config import CONTRACT_FLAG_ALERT_RATE, RETRIEVAL_K, THRESHOLDS, Thresholds, pick_tier  # noqa: E402
-from src.corpus import build_corpus, retrieve_semantic, warm_retrieval  # noqa: E402
+from src.corpus import build_corpus, retrieve_hybrid, warm_retrieval  # noqa: E402
 from src.llm import ACCOUNT, adjudicate, warm_cache  # noqa: E402
 from src.schema import MatchDecision, OrderLine  # noqa: E402
 
@@ -101,7 +101,7 @@ def evaluate_case(case: dict) -> EvalRecord:
     )
     corpus = build_corpus()
     query = order.raw_description + (f" {order.sku_hint}" if order.sku_hint else "")
-    candidates = retrieve_semantic(query, corpus, k=RETRIEVAL_K)
+    candidates = retrieve_hybrid(query, corpus, k=RETRIEVAL_K)
 
     record = EvalRecord(
         case=case,
@@ -327,7 +327,7 @@ def run_offline(cases: list[dict]) -> int:
     for case in benign:
         order_text = case["raw_description"]
         query = order_text + (f" {case['sku_hint']}" if case.get("sku_hint") else "")
-        candidates = retrieve_semantic(query, build_corpus(), k=RETRIEVAL_K)
+        candidates = retrieve_hybrid(query, build_corpus(), k=RETRIEVAL_K)
         records.append(EvalRecord(
             case=case,
             retrieved_skus=[c.contract.sku for c in candidates],

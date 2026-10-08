@@ -180,9 +180,25 @@ class Thresholds:
 
 THRESHOLDS = Thresholds()
 
-# How many contract lines retrieval puts in front of the LLM. This is the single
-# biggest lever on prompt size: the corpus could be 10k lines; the prompt sees 3.
-RETRIEVAL_K = 3
+# How many products retrieval puts in front of the LLM. Chosen from a measured
+# curve (evals/retrieval_recall.py, 272 held-out test orders against 24,717 real
+# products, hybrid retrieval): recall@3 84.6%, @5 89.3%, @10 94.9%, @20 96.0%.
+# The knee is at 10. A product missing from the shortlist is money lost with no
+# signal at all; an extra candidate costs ~40 uncached prompt tokens. Was 3, which
+# was chosen against 7 contract lines, where any k >= 3 scores 100% by arithmetic.
+# The confidence bars were swept at k=3 and must be re-swept at 10 (Step 3).
+RETRIEVAL_K = 10
+
+# Hybrid retrieval: reciprocal-rank fusion of BM25 (weight 1) and embeddings.
+# On real catalog text the embedding model alone found the right product in the
+# top 3 only 63% of the time; BM25, 85%. Part numbers, brands and sizes are exact
+# tokens, and a sentence embedding blurs them. The semantic weight was chosen on
+# the TUNE split (0.1 beat 0, 0.25, 0.5, 1.0 at @3) and only then scored on test,
+# where it ties pure BM25. It stays as a net for shorthand and synonyms ("cath",
+# "pf") that BM25 cannot connect and that degraded-from-source orders under-test.
+HYBRID_SEMANTIC_WEIGHT = 0.1
+RRF_K = 60            # the standard reciprocal-rank-fusion constant
+FUSION_DEPTH = 200    # rows taken from each ranking before fusing
 
 
 # --- Corpus source -------------------------------------------------------

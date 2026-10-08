@@ -5,7 +5,6 @@ these exercise the retrieval plumbing — grouping, caching, locking — not the
 quality of the vectors.
 """
 import threading
-import zlib
 from datetime import date
 
 import numpy as np
@@ -17,29 +16,13 @@ from src.recovery import (CLAIMABLE, NEEDS_REVIEW, SAVINGS_OPPORTUNITY,
                           select_contract_price)
 from src.schema import ContractPrice, OrderLine
 
+from fakes import FakeModel
+
 
 def _row(sku, desc="Nitrile exam glove large", holder="Medline", contract="C1", price=9.0, **kw):
     return ContractPrice(sku=sku, description=desc, vendor=holder, holder=holder,
                          contracted_unit_price=price, source=f"src {contract}",
                          contract_id=contract, **kw)
-
-
-class FakeModel:
-    """Embeds by hashing words into 512 dims: deterministic, instant, offline.
-
-    crc32, not hash(): Python salts str hashes per process, which made word
-    collisions — and so these tests — random.
-    """
-    def encode(self, texts, convert_to_tensor=True, normalize_embeddings=True, **_):
-        single = isinstance(texts, str)
-        rows = []
-        for t in ([texts] if single else texts):
-            v = np.zeros(512, dtype=np.float32)
-            for w in t.lower().split():
-                v[zlib.crc32(w.encode()) % 512] += 1
-            rows.append(v / (np.linalg.norm(v) or 1))
-        out = torch.from_numpy(np.stack(rows))
-        return out[0] if single else out
 
 
 @pytest.fixture

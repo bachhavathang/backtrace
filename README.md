@@ -48,8 +48,8 @@ wins** — the email addendum's $3.60 overrides the GPO's $4.20. Provenance is k
 on every price, because a recovery claim has to point at the document it came from.
 
 **2. Retrieve to narrow, then let the LLM adjudicate — never trust one alone.**
-Retrieval (semantic embeddings via `all-MiniLM-L6-v2`) produces a shortlist of
-candidate contract lines; an LLM then picks the true match from that shortlist or
+Retrieval (hybrid: BM25 fused by rank with `all-MiniLM-L6-v2` embeddings) produces
+a shortlist of candidate products; an LLM then picks the true match from that shortlist or
 declares it ambiguous. Each tool does what it's good at: retrieval is a *recall*
 tool (cast a wide net cheaply), the LLM is a *precision* tool (fine distinctions
 between near-duplicates). This division is load-bearing, not decorative — see the
@@ -271,8 +271,8 @@ fires on the attack you already imagined is not a measurement.
 
 | Lever | Effect |
 |---|---|
-| Retrieve before prompting | The corpus could hold 10k contract lines; the prompt sees 3. ~75x fewer input tokens than stuffing the corpus. |
-| Retrieval floor short-circuit | Lines below the similarity floor return NO_MATCH with **no model call at all**. On real non-catalog spend most lines genuinely aren't under contract, so this is the largest single saving. |
+| Retrieve before prompting | The real corpus holds 24,883 contract lines; the prompt sees 10 products. Thousands of times fewer input tokens than stuffing the corpus. |
+| Retrieval floor short-circuit | Lines below the similarity floor return NO_MATCH with **no model call at all**. *Measured on real catalog text it never fires:* orders whose product is absent score a median top-1 similarity of 0.76, against 0.78 for orders whose product is present, so no floor separates them. Kept as a guard; not the saving it was assumed to be. |
 | Prompt caching | The system prompt is a stable ~1,500-token prefix with the cache breakpoint on it; only the order + shortlist vary. Cached tokens bill at ~10%. |
 | Model tiering | A runaway top candidate goes to Haiku 4.5; a photo-finish between two contracts at different prices buys Sonnet 5 — the close calls are precisely where false claims come from. |
 | Structured outputs | A fixed JSON schema, so no retry-on-parse loop and a bounded 300-token ceiling. |
@@ -297,7 +297,10 @@ has no other symptom.
 **And then the honest ordering.** Everything in this section is correct and worth
 roughly nothing. Priced against real volumes — 100k order lines, ~45k adjudications
 after the retrieval floor — a full annual scan costs **under $130 of inference, and
-under $70 on the Batch API**. The 26.6% escalation rate over the same scan costs
+under $70 on the Batch API**. (That assumed the floor removes over half the lines;
+measured on real catalog text it removes none, and the shortlist is now 10 products,
+so the real figure is a few hundred dollars. The conclusion below survives by a wide
+margin — see `docs/WORKING_STATE.md`, Step 2.) The 26.6% escalation rate over the same scan costs
 **~$13,500 of reviewer time**. Reviewer attention is ~105x the inference bill, and
 one point of escalation rate is worth ~4x the *entire* annual token spend. One
 human review buys ~200 Opus 5 adjudications, which inverts the usual instinct: the
@@ -306,8 +309,8 @@ it. The derivation, and what it implies for tiering, is
 [§2-3 of the production design](docs/PRODUCTION_DESIGN.md#2-inference-cost-computed-rather-than-assumed).
 
 Token optimisation stays in this README because the cache-minimum trap is a real
-engineering lesson and the retrieval short-circuit is genuinely the largest lever
-here. It is listed under production concerns, not first among them.
+engineering lesson. The retrieval short-circuit was listed as the largest lever; on
+real data it does nothing, which is exactly why it had to be measured. It is listed under production concerns, not first among them.
 
 ### Latency management
 
@@ -373,7 +376,7 @@ src/config.py      model tiers, thresholds, budgets — all tunables in one plac
 src/prompts.py     system prompt (cached prefix) + per-order suffix + schema
 src/guardrails.py  input sanitising, output validation, escalation policy
 src/llm.py         the gateway: the only place a model is called
-src/corpus.py      messy sources -> one price index + semantic retrieval
+src/corpus.py      messy sources -> one price index + hybrid retrieval over products
 src/agent.py       the reverse-map graph and the confidence policy
 src/recovery.py    dollar math + idempotent, audited ledger
 evals/             labelled set + metrics + threshold sweep
