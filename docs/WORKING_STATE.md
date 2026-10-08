@@ -475,6 +475,40 @@ Carried forward from PR 3a:
 - VA "EA" sometimes prices a pack (e.g. one catheter at $1,171). This overstates the
   contract price, which shrinks a claim — the safe direction — but it is noise.
 
+**PR 3b status (2026-10-08, branch `step1-pr3b-products`, stacked on PR 3a):**
+- **Shortlist = products.** `retrieve_*` return k distinct products; each
+  `CandidateMatch` carries `group` (every contract row for that product). Rows join
+  only on a shared normalised part number plus the same registry maker or identical
+  description — under-merge costs a human look, over-merge would cost a false claim.
+- **Holder rule** (settled 2026-10-07) is in `select_contract_price`: seller holds it
+  (A) or maker holds it (B) → claimable; anyone else → `SAVINGS_OPPORTUNITY`.
+- **Embeddings persist** to `data/cache/` keyed on a hash of the exact texts + model.
+- Flags, the prompt's vendor field (`reverse-map/v6`, lists all vendors of a product)
+  and the human gate see the whole group; the gate rebuilds by identity, not SKU.
+- **Deadlock found and fixed:** the first semantic query held the embedding lock
+  while the model load took it again — every run hung. Pinned by a threaded test.
+
+Measured on the 24,883-line corpus:
+
+| | |
+|---|---|
+| Products | 24,717 (152 products span more than one contract row) |
+| Shortlists repeating a product, row-level → product-level | 1% → **0%** (300 sampled queries) |
+| Embedding the corpus, first run → cached | 155 s → **0.1 s** |
+| Remaining startup cost | corpus parse 22 s, `sentence_transformers` import 11 s |
+| Query latency | ~80 ms |
+
+**G6 was smaller than feared.** "878 SKUs on >1 row" were mostly *different*
+products sharing a part number (different maker or description), which the
+conservative key correctly keeps apart. The hard retrieval problem in real data is
+near-duplicates — same product family, different size or pack — which is exactly
+what Step 2's recall@k measurement is for.
+
+Carried forward from PR 3b:
+- `select_contract_price` is still not wired into the scan: it needs order lines that
+  name a seller and a maker, which PR 4's degraded real orders will carry.
+- Corpus parse (22 s) could be cached like the embeddings; not yet worth it.
+
 ---
 
 ## 6. Housekeeping / loose ends
