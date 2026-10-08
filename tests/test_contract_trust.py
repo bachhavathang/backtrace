@@ -90,7 +90,7 @@ def test_contract_lines_are_fenced_and_escaped():
 
 def test_system_prompt_treats_contract_text_as_data():
     assert "contract_lines" in prompts.SYSTEM_PROMPT
-    assert prompts.PROMPT_VERSION == "reverse-map/v5"
+    assert prompts.PROMPT_VERSION == "reverse-map/v6"
 
 
 # --- Decision: a flagged line shown to the model blocks auto-claim -----------

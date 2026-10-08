@@ -36,9 +36,10 @@ import hashlib
 import re
 import threading
 
-from .config import CORPUS_SOURCE
+from .config import CORPUS_SOURCE, EMBED_CACHE
 from .ingest import IngestReport, load_all, sources_for
 from .schema import CandidateMatch, ContractPrice
+from .sources.openfda import normalise_part
 
 _corpus: list[ContractPrice] | None = None
 _report: IngestReport | None = None
@@ -104,6 +105,72 @@ def _hash_extras(c: ContractPrice) -> str:
     return (":" + ",".join(extras)) if extras else ""
 
 
+# --- Products --------------------------------------------------------------
+#
+# One physical product can sit on many contract rows: an FSS and a BPA price for
+# the same item, or several resellers carrying one maker's part. In the 24,883-line
+# VA corpus, 878 SKUs appear on more than one row. Retrieved row by row, a shortlist
+# of three can be "the same glove x3", and the adjudicator — correctly told to
+# abstain when two candidates fit equally — abstains on every common item (G6).
+#
+# So the shortlist is three PRODUCTS. product_key() errs towards keeping rows
+# apart: merging two different products would put one product's price on the
+# other (a false claim), while failing to merge two copies only costs an
+# abstention (a human look). Rows join one product only when they share a
+# normalised part number AND either the registry maker or the exact description.
+
+def identity_string(row: ContractPrice) -> str:
+    """A row's identity_key as one string, for provenance and lookup."""
+    return "|".join(row.identity_key)
+
+
+def product_key(row: ContractPrice) -> tuple[str, str]:
+    part = normalise_part(row.sku) or row.sku
+    maker = (row.manufacturer or "").strip().upper()
+    if maker:
+        return part, "maker:" + maker
+    return part, "desc:" + " ".join(row.description.lower().split())
+
+
+_groups_for: tuple[int, int] | None = None
+_groups: dict[tuple[str, str], list[ContractPrice]] = {}
+_groups_lock = threading.Lock()
+
+
+def product_groups(corpus: list[ContractPrice]) -> dict[tuple[str, str], list[ContractPrice]]:
+    """Every product in the corpus, with all of its contract rows. Built once per corpus."""
+    global _groups_for, _groups
+    ident = (id(corpus), len(corpus))
+    if _groups_for != ident:
+        with _groups_lock:
+            if _groups_for != ident:
+                groups: dict[tuple[str, str], list[ContractPrice]] = {}
+                for row in corpus:
+                    groups.setdefault(product_key(row), []).append(row)
+                _groups, _groups_for = groups, ident
+    return _groups
+
+
+def _top_products(ranked: list[int], scores: list[float], corpus: list[ContractPrice],
+                  k: int) -> list[CandidateMatch]:
+    """Walk rows best-first, keeping the best row of each product until k products."""
+    groups = product_groups(corpus)
+    seen: set[tuple[str, str]] = set()
+    out: list[CandidateMatch] = []
+    for i in ranked:
+        row = corpus[i]
+        key = product_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        group = groups[key]
+        out.append(CandidateMatch(contract=row, similarity=round(float(scores[i]), 3),
+                                  group=group if len(group) > 1 else []))
+        if len(out) == k:
+            break
+    return out
+
+
 # --- Retrieval -----------------------------------------------------------
 
 def _tokens(s: str) -> set[str]:
@@ -118,23 +185,26 @@ def retrieve_keyword(query: str, corpus: list[ContractPrice], k: int = 3
     abbreviations so you can SEE why embeddings matter.
     """
     q = _tokens(query)
-    scored: list[CandidateMatch] = []
+    scores = []
     for cp in corpus:
         c = _tokens(cp.description + " " + cp.sku)
-        overlap = len(q & c) / len(q | c) if (q | c) else 0.0
-        scored.append(CandidateMatch(contract=cp, similarity=round(overlap, 3)))
-    scored.sort(key=lambda m: m.similarity, reverse=True)
-    return scored[:k]
+        scores.append(round(len(q & c) / len(q | c), 3) if (q | c) else 0.0)
+    ranked = sorted(range(len(corpus)), key=lambda i: scores[i], reverse=True)
+    return _top_products(ranked, scores, corpus, k)
 
 
 # Module-level cache so we load the model + embed the corpus only ONCE,
 # not on every order. (Loading the model is slow; doing it per-call would crawl.)
 # The lock matters once a scan runs orders concurrently: without it, eight
 # workers starting together would each load their own copy of the model.
+EMBED_MODEL = "all-MiniLM-L6-v2"
 _model = None
-_corpus_cache = None
+_corpus_cache: tuple[int, int] | None = None
 _corpus_embeddings = None
-_embed_lock = threading.Lock()
+# Re-entrant: retrieve_semantic holds it while embedding the corpus, and embedding
+# needs the model, whose first load takes the same lock. A plain Lock deadlocked
+# there on the first query of every run.
+_embed_lock = threading.RLock()
 
 
 def _get_model():
@@ -143,7 +213,7 @@ def _get_model():
         with _embed_lock:
             if _model is None:
                 from sentence_transformers import SentenceTransformer
-                _model = SentenceTransformer("all-MiniLM-L6-v2")
+                _model = SentenceTransformer(EMBED_MODEL)
     return _model
 
 
@@ -157,31 +227,64 @@ def warm_retrieval() -> None:
     retrieve_semantic("warmup", build_corpus(), k=1)
 
 
+def _embedding_texts(corpus: list[ContractPrice]) -> list[str]:
+    return [c.description + " " + c.sku for c in corpus]
+
+
+def embedding_cache_path(texts: list[str]):
+    """Where the vectors for exactly these texts, from exactly this model, live.
+
+    Keyed on a hash of the texts themselves. The old in-memory key was the tuple
+    of SKUs, which cannot tell two rows sharing a SKU apart and does not change
+    when a description does.
+    """
+    payload = chr(31).join([EMBED_MODEL, *texts]).encode("utf-8")
+    return EMBED_CACHE / f"{EMBED_MODEL}-{hashlib.sha256(payload).hexdigest()[:16]}.npy"
+
+
+def _load_or_embed(corpus: list[ContractPrice]):
+    """Corpus vectors, from disk when this exact corpus was embedded before (G12).
+
+    Embedding 25k lines on a CPU takes minutes; doing it on every run and every
+    eval made the real corpus impractical. The cache is only ever an optimisation:
+    any read or write failure falls through to embedding in memory.
+    """
+    import numpy as np
+    import torch
+
+    texts = _embedding_texts(corpus)
+    path = embedding_cache_path(texts)
+    try:
+        arr = np.load(path)
+        if arr.shape[0] == len(texts):
+            return torch.from_numpy(arr)
+    except (OSError, ValueError):
+        pass
+    emb = _get_model().encode(texts, convert_to_tensor=True, normalize_embeddings=True,
+                              batch_size=128, show_progress_bar=len(texts) > 2000)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(path, emb.cpu().numpy())
+    except OSError:
+        pass
+    return emb
+
+
 def retrieve_semantic(query: str, corpus: list[ContractPrice], k: int = 3
                       ) -> list[CandidateMatch]:
     """Embedding-based retrieval. Ranks by cosine similarity of MEANING."""
     global _corpus_cache, _corpus_embeddings
+    import torch
     from sentence_transformers import util
 
-    model = _get_model()
-
-    # Embed the corpus once and reuse it. We key the cache on the SKUs present,
-    # so if the corpus changes we rebuild.
-    corpus_key = tuple(c.sku for c in corpus)
-    if _corpus_cache != corpus_key:
+    ident = (id(corpus), len(corpus))
+    if _corpus_cache != ident:
         with _embed_lock:
-            if _corpus_cache != corpus_key:
-                texts = [c.description + " " + c.sku for c in corpus]
-                _corpus_embeddings = model.encode(texts, convert_to_tensor=True,
-                                                  normalize_embeddings=True)
-                _corpus_cache = corpus_key
+            if _corpus_cache != ident:
+                _corpus_embeddings = _load_or_embed(corpus)
+                _corpus_cache = ident
 
-    q_emb = model.encode(query, convert_to_tensor=True, normalize_embeddings=True)
-    scores = util.cos_sim(q_emb, _corpus_embeddings)[0]  # one score per contract
-
-    scored = [
-        CandidateMatch(contract=corpus[i], similarity=round(float(scores[i]), 3))
-        for i in range(len(corpus))
-    ]
-    scored.sort(key=lambda m: m.similarity, reverse=True)
-    return scored[:k]
+    q_emb = _get_model().encode(query, convert_to_tensor=True, normalize_embeddings=True)
+    scores = util.cos_sim(q_emb, _corpus_embeddings.to(q_emb.device))[0]  # one per row
+    ranked = torch.argsort(scores, descending=True).tolist()
+    return _top_products(ranked, scores.tolist(), corpus, k)
